@@ -23,3 +23,9 @@ log/db/*.db
 */*.db
 */*/*.db
 log/db/kline_cache.db
+*/db
+*/db/
+*/db/*
+log/db/*
+*.log
+*.sqlite3
