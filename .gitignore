@@ -1,5 +1,4 @@
 .pyc
-log/db/*
 *.log
 *.sqlite3
 *.env
@@ -17,11 +16,8 @@ __pycache__/
 *.pyo
 *.pyd
 env/
-log/db/*.db
 */__pycache__/
-*db
-*/*.db
-*/*/*.db
+*.db
 log/db/kline_cache.db
 log/db/*
 *.log
