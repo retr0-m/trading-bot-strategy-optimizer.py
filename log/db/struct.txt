@@ -1,7 +1,0 @@
-symbol   (BTCUSDT, ETHUSDT, etc)
-side
-price
-amount
-fee
-balance_after
-timestamp
