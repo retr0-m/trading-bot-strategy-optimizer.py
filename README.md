@@ -73,3 +73,4 @@ Dashboard runs at `http://127.0.0.1:8000` as usual.
   To use the real 24h high, replace with `binance.get_ticker(symbol=symbol_name)["highPrice"]`.
 - No max drawdown guard — if price keeps dropping the bot keeps buying until $0.  
   Add a `MAX_TOTAL_SPEND_PER_SYMBOL` cap in config if you want a hard limit.
+# trading-bot-strategy-optimizer.py
