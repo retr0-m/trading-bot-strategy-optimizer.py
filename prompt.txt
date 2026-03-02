@@ -1,0 +1,2461 @@
+===== ./analysis/price_recorder.py =====
+"""
+analysis/price_recorder.py
+───────────────────────────
+Records live prices for all DCA_SYMBOLS into a separate prices.db.
+Runs as a daemon thread launched from main.py.
+
+Schema:
+    prices(symbol, timestamp_ms, open, high, low, close, volume)
+
+Each row = one price snapshot. Interval is configurable via PRICE_RECORD_INTERVAL_S.
+Uses the same Binance client already initialized in main.py.
+"""
+
+from math import log
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from binance.client import Client
+from log.logger import log_price_recorder
+
+PRICES_DB_PATH        = Path("log/db/prices.db")
+PRICE_RECORD_INTERVAL = 30   # seconds between snapshots — tune freely
+
+
+# ── DB setup ──────────────────────────────────────────────────────────── #
+
+def _init_prices_db():
+    PRICES_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(PRICES_DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS prices (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol       TEXT    NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                open         REAL    NOT NULL,
+                high         REAL    NOT NULL,
+                low          REAL    NOT NULL,
+                close        REAL    NOT NULL,
+                volume       REAL    NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_ts ON prices(symbol, timestamp_ms)")
+        conn.commit()
+
+
+def _record_snapshot(conn: sqlite3.Connection, binance: Client, symbols: list[str]):
+    """Fetch latest completed 1m candle for each symbol and store it."""
+    now_ms = int(time.time() * 1000)
+    rows = []
+
+    for symbol in symbols:
+        try:
+            # Fetch last 2 candles — use the second-to-last (last completed)
+            klines = binance.get_klines(symbol=symbol, interval="1m", limit=2)
+            if not klines or len(klines) < 1:
+                continue
+            k = klines[-1]   # most recent (may be mid-candle — still useful for tracking)
+            rows.append((
+                symbol,
+                int(k[0]),      # candle open time ms
+                float(k[1]),    # open
+                float(k[2]),    # high
+                float(k[3]),    # low
+                float(k[4]),    # close
+                float(k[5]),    # volume
+            ))
+        except Exception as e:
+            log_price_recorder(f"[price_recorder] error fetching {symbol}: {e}")
+
+    if rows:
+        conn.executemany("""
+            INSERT INTO prices (symbol, timestamp_ms, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+        conn.commit()
+    
+    log_price_recorder(f"Recorded prices for {len(rows)} symbols at {now_ms} ms")
+
+
+# ── Main recorder loop ────────────────────────────────────────────────── #
+
+def _recorder_loop(binance: Client, symbols: list[str]):
+    _init_prices_db()
+    # Persistent connection — this thread owns it exclusively
+    conn = sqlite3.connect(PRICES_DB_PATH, check_same_thread=False)
+
+    log_price_recorder(f"[price_recorder] started — recording {symbols} every {PRICE_RECORD_INTERVAL}s")
+
+    while True:
+        try:
+            log_price_recorder("Starting new price snapshot...")
+            _record_snapshot(conn, binance, symbols)
+        except Exception as e:
+            log_price_recorder(f"[price_recorder] snapshot error: {e}")
+        time.sleep(PRICE_RECORD_INTERVAL)
+
+
+def start_price_recorder(binance: Client, symbols: list[str]):
+    """Launch the recorder as a background daemon thread. Call once from main.py."""
+    log_price_recorder(f"Starting price recorder for symbols: {symbols}")
+    t = threading.Thread(
+        target=_recorder_loop,
+        args=(binance, symbols),
+        daemon=True,
+        name="price_recorder"
+    )
+    log_price_recorder("Thread initialized, starting...")
+    t.start()
+    return t
+
+
+===== ./analysis/reports/stop_loss.txt =====
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.19
+[BTCUSDT]      Base stop loss: 63520.16, take profit: 64668.14, current price: 63894.13
+[ETHUSDT]      Base stop loss: 1833.26, take profit: 1874.50, current price: 1846.38
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.34
+[BTCUSDT]      Base stop loss: 63520.07, take profit: 64668.14, current price: 63847.39
+[ETHUSDT]      Base stop loss: 1833.26, take profit: 1874.50, current price: 1845.83
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.30
+[BTCUSDT]      Base stop loss: 63516.88, take profit: 64675.52, current price: 63914.00
+[ETHUSDT]      Base stop loss: 1833.00, take profit: 1875.09, current price: 1848.89
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.37
+[BTCUSDT]      Base stop loss: 63510.49, take profit: 64689.83, current price: 63939.49
+[ETHUSDT]      Base stop loss: 1832.86, take profit: 1875.40, current price: 1849.25
+[SOLUSDT]      Base stop loss: 76.71, take profit: 78.72, current price: 77.43
+[BTCUSDT]      Base stop loss: 63510.43, take profit: 64689.83, current price: 63909.40
+[ETHUSDT]      Base stop loss: 1832.86, take profit: 1875.40, current price: 1848.14
+[SOLUSDT]      Base stop loss: 76.71, take profit: 78.72, current price: 77.42
+... (more lines) ...
+[BTCUSDT]      Base stop loss: 63521.49, take profit: 64665.18, current price: 63895.96
+[ETHUSDT]      Base stop loss: 1833.36, take profit: 1874.29, current price: 1847.97
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.67, current price: 77.29
+[BTCUSDT]      Base stop loss: 63521.49, take profit: 64665.18, current price: 63891.75
+[ETHUSDT]      Base stop loss: 1833.36, take profit: 1874.29, current price: 1847.14
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.67, current price: 77.30
+... (more lines) ...
+[BTCUSDT]      Base stop loss: 63542.65, take profit: 64617.89, current price: 63835.06
+[ETHUSDT]      Base stop loss: 1834.33, take profit: 1872.12, current price: 1845.21
+[SOLUSDT]      Base stop loss: 76.77, take profit: 78.59, current price: 77.29
+
+
+===== ./analysis/trade_chart.py =====
+"""
+analysis/trade_chart.py
+────────────────────────
+Standalone script — run manually to visualize any completed trade.
+
+Reads:
+- log/db/portfolio.db  → trade records (entry/exit price, time, fees)
+- log/db/prices.db     → recorded price snapshots during the trade
+
+Plots:
+- Price line from first BUY to SELL + padding
+- Entry marker (▲ green), Exit marker (▼ red)
+- Stop loss line (red dashed)
+- Take profit line (green dashed)
+- Break-even line (orange dashed) — entry + fees
+- Trailing stop progression (purple dashed) if applicable
+- Shaded holding period
+- P&L summary in title
+
+Usage:
+    python analysis/trade_chart.py                     # plots all round-trips (interactive)
+    python analysis/trade_chart.py --pdf               # saves PDF to analysis/reports/<datetime>.pdf
+    python analysis/trade_chart.py --symbol SOLUSDT    # one symbol
+    python analysis/trade_chart.py --last 5            # last N completed trades
+    python analysis/trade_chart.py --sell-id 42        # trade by SELL row id
+
+Requirements:  pip install matplotlib
+"""
+
+import sqlite3
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+
+import sys
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+from matplotlib.gridspec import GridSpec
+from matplotlib.backends.backend_pdf import PdfPages
+
+# config.py lives one level up (bot root), not inside analysis/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import FEE_RATE, LESS_STRICT_SHOULD_LONG
+# ── Config (keep in sync with your bot's config.py) ───────────────────── #
+PORTFOLIO_DB = Path("log/db/portfolio.db")
+PRICES_DB    = Path("log/db/prices.db")
+REPORTS_DIR  = Path("analysis/reports")
+
+
+
+
+# ── DB helpers ────────────────────────────────────────────────────────── #
+
+def _parse_dt(s: str) -> datetime:
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def load_round_trips(symbol: str | None, last_n: int | None, sell_id: int | None) -> list[dict]:
+    """
+    Pair BUY→SELL rows from portfolio.db into round-trips.
+    DCA: multiple BUYs averaged into one entry before a SELL.
+    """
+    with sqlite3.connect(PORTFOLIO_DB) as conn:
+        rows = conn.execute("""
+            SELECT id, symbol, side, price, amount, fee, balance_after, sl, tp, timestamp
+            FROM trades ORDER BY id ASC
+        """).fetchall()
+
+    if symbol:
+        rows = [r for r in rows if r[1] == symbol.upper()]
+
+    open_buys: dict[str, list] = {}
+    round_trips = []
+
+    for row in rows:
+        rid, sym, side, price, amount, fee, balance_after, sl, tp, ts = row
+        dt = _parse_dt(ts)
+
+        if side == "BUY":
+            open_buys.setdefault(sym, []).append({
+                "id": rid, "price": price, "amount": amount, "fee": fee, "time": dt,
+                "sl": sl, "tp": tp,
+            })
+
+        elif side == "SELL" and sym in open_buys:
+            buys = open_buys.pop(sym)
+
+            total_qty     = sum(b["amount"] for b in buys)
+            total_cost    = sum(b["price"] * b["amount"] for b in buys)
+            total_buy_fee = sum(b["fee"] for b in buys)
+            avg_entry     = total_cost / total_qty if total_qty else price
+
+            sell_value = price * amount
+            sell_fee   = fee
+            pnl        = sell_value - total_cost - total_buy_fee - sell_fee
+            pnl_pct    = pnl / total_cost * 100 if total_cost else 0
+
+            hold_secs  = (dt - buys[0]["time"]).total_seconds()
+
+            round_trips.append({
+                "symbol":        sym,
+                "sell_id":       rid,
+                "buy_ids":       [b["id"] for b in buys],
+                "dca_levels":    len(buys),
+                "avg_entry":     avg_entry,
+                "sl":            buys[0]["sl"],   # set at first BUY — actual bot value
+                "tp":            buys[0]["tp"],   # set at first BUY — actual bot value
+                "sell_price":    price,
+                "qty":           total_qty,
+                "total_cost":    total_cost,
+                "total_buy_fee": total_buy_fee,
+                "sell_fee":      sell_fee,
+                "pnl":           pnl,
+                "pnl_pct":       pnl_pct,
+                "entry_time":    buys[0]["time"],
+                "sell_time":     dt,
+                "hold_secs":     hold_secs,
+                "balance_after": balance_after,
+                "buys":          buys,
+            })
+
+    if sell_id:
+        round_trips = [rt for rt in round_trips if rt["sell_id"] == sell_id]
+    if last_n:
+        round_trips = round_trips[-last_n:]
+
+    return round_trips
+
+
+def load_prices(symbol: str, from_ms: int, to_ms: int) -> list[tuple]:
+    """Load price rows from prices.db for a time window."""
+    if not PRICES_DB.exists():
+        return []
+    with sqlite3.connect(PRICES_DB) as conn:
+        rows = conn.execute("""
+            SELECT timestamp_ms, open, high, low, close, volume
+            FROM prices
+            WHERE symbol = ? AND timestamp_ms BETWEEN ? AND ?
+            ORDER BY timestamp_ms ASC
+        """, (symbol, from_ms, to_ms)).fetchall()
+    return rows
+
+
+# ── Chart core ────────────────────────────────────────────────────────── #
+
+def _ms_to_dt(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+def _style_axes(axes: list):
+    for ax in axes:
+        ax.set_facecolor("#0d1117")
+        ax.spines["bottom"].set_color("#333")
+        ax.spines["top"].set_color("#333")
+        ax.spines["left"].set_color("#333")
+        ax.spines["right"].set_color("#333")
+        ax.tick_params(colors="#aaa", labelsize=8)
+        ax.tick_params(axis="x", colors="#aaa")
+
+
+def plot_trade(rt: dict, ax_price: plt.Axes, ax_pnl: plt.Axes):
+    symbol     = rt["symbol"]
+    avg_entry  = rt["avg_entry"]
+    sell_price = rt["sell_price"]
+    entry_time = rt["entry_time"]
+    sell_time  = rt["sell_time"]
+
+    pad_ms  = 10 * 60 * 1000
+    from_ms = int(entry_time.timestamp() * 1000) - pad_ms
+    to_ms   = int(sell_time.timestamp()  * 1000) + pad_ms
+
+    prices = load_prices(symbol, from_ms, to_ms)
+
+    # ── Price line ─────────────────────────────────────────────────────── #
+    if prices:
+        times  = [_ms_to_dt(p[0]) for p in prices]
+        closes = [p[4] for p in prices]
+        ax_price.plot(times, closes, color="#4FC3F7", linewidth=1.5, zorder=2)
+        ax_price.axvspan(entry_time, sell_time, alpha=0.08, color="#4FC3F7", zorder=1)
+
+        pnl_curve = [(c - avg_entry) * rt["qty"] for c in closes]
+        bar_colors = ["#26A69A" if p >= 0 else "#EF5350" for p in pnl_curve]
+        ax_pnl.bar(times, pnl_curve, color=bar_colors, width=0.0003, zorder=2)
+        ax_pnl.axhline(0, color="#555", linewidth=0.8, linestyle="--")
+        ax_pnl.axvspan(entry_time, sell_time, alpha=0.06, color="#4FC3F7", zorder=1)
+    else:
+        ax_price.annotate("No price data in prices.db\n(price_recorder must run during trade)",
+                        xy=(0.5, 0.5), xycoords="axes fraction",
+                        ha="center", color="#888", fontsize=9)
+
+    # ── Key levels — real values from DB ──────────────────────────────── #
+    breakeven = avg_entry * (1 + 2 * FEE_RATE)
+    sl_price  = rt["sl"]   # actual value set by bot at entry
+    tp_price  = rt["tp"]   # actual value set by bot at entry
+
+    ax_price.axhline(avg_entry,  color="#FFA726", linewidth=1.2, linestyle="--", label=f"Avg entry ${avg_entry:.4f}")
+    ax_price.axhline(breakeven,  color="#FFEB3B", linewidth=0.8, linestyle=":",  label=f"Break-even ${breakeven:.4f}")
+    ax_price.axhline(sl_price,   color="#EF5350", linewidth=1.0, linestyle="--", label=f"SL ${sl_price:.4f}")
+    ax_price.axhline(tp_price,   color="#26A69A", linewidth=1.0, linestyle="--", label=f"TP ${tp_price:.4f}")
+    ax_price.axhline(sell_price, color="#CE93D8", linewidth=1.2, linestyle="-.", label=f"Exit ${sell_price:.4f}")
+
+    # ── Entry / exit markers ───────────────────────────────────────────── #
+    for buy in rt["buys"]:
+        ax_price.scatter(buy["time"], buy["price"],
+                        marker="^", color="#26A69A", s=120, zorder=5,
+                        label=f"BUY ${buy['price']:.4f}" if buy == rt["buys"][0] else "")
+
+    ax_price.scatter(sell_time, sell_price,
+                    marker="v", color="#EF5350", s=120, zorder=5, label=f"SELL ${sell_price:.4f}")
+
+    for i, buy in enumerate(rt["buys"]):
+        ax_price.annotate(f"L{i+1}", xy=(buy["time"], buy["price"]),
+                        xytext=(5, 8), textcoords="offset points",
+                        color="#26A69A", fontsize=7)
+
+    # ── Labels ─────────────────────────────────────────────────────────── #
+    pnl_color = "#26A69A" if rt["pnl"] >= 0 else "#EF5350"
+    hold_str  = f"{int(rt['hold_secs']//60)}m {int(rt['hold_secs']%60)}s"
+
+    ax_price.set_title(
+        f"{symbol}  |  DCA levels: {rt['dca_levels']}  |  "
+        f"Avg entry: ${avg_entry:.4f}  →  Exit: ${sell_price:.4f}  |  LESS_STRICT_SHOULD_LONG={LESS_STRICT_SHOULD_LONG}",
+        color="#ccc", fontsize=9, pad=4
+    )
+    ax_price.text(0.98, 1.01,
+                f"{'▲' if rt['pnl'] >= 0 else '▼'} ${rt['pnl']:.4f} ({rt['pnl_pct']:+.2f}%)",
+                transform=ax_price.transAxes, ha="right", va="bottom",
+                color=pnl_color, fontsize=9, fontweight="bold")
+    ax_price.text(0.02, 1.01, f"Hold: {hold_str}",
+                transform=ax_price.transAxes, ha="left", va="bottom",
+                color="#aaa", fontsize=8)
+
+    ax_price.legend(fontsize=7, loc="upper left", framealpha=0.3)
+    ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax_price.set_ylabel("Price", color="#aaa", fontsize=8)
+    ax_price.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+    ax_pnl.set_ylabel("Unrealized P&L $", color="#aaa", fontsize=7)
+    ax_pnl.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    _style_axes([ax_price, ax_pnl])
+
+
+# ── PDF export ────────────────────────────────────────────────────────── #
+
+def _make_summary_fig(round_trips: list[dict]) -> plt.Figure:
+    """Page 1: cumulative P&L curve + stats + per-symbol table."""
+    fig = plt.figure(figsize=(16, 10), facecolor="#0d1117")
+    fig.patch.set_facecolor("#0d1117")
+
+    gs = GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35,
+                top=0.88, bottom=0.08, left=0.07, right=0.97)
+    ax_equity  = fig.add_subplot(gs[0, :])
+    ax_stats   = fig.add_subplot(gs[1, 0])
+    ax_symbols = fig.add_subplot(gs[1, 1])
+    _style_axes([ax_equity, ax_stats, ax_symbols])
+
+    # Cumulative P&L
+    times      = [rt["sell_time"] for rt in round_trips]
+    cumulative = []
+    running    = 0.0
+    for rt in round_trips:
+        running += rt["pnl"]
+        cumulative.append(running)
+
+    ax_equity.plot(times, cumulative, color="#4FC3F7", linewidth=2, zorder=2)
+    ax_equity.fill_between(times, cumulative, 0,
+                        where=[c >= 0 for c in cumulative], color="#26A69A", alpha=0.25)
+    ax_equity.fill_between(times, cumulative, 0,
+                        where=[c < 0 for c in cumulative], color="#EF5350", alpha=0.25)
+    ax_equity.axhline(0, color="#444", linewidth=0.8, linestyle="--")
+    ax_equity.set_title("Cumulative P&L", color="#ccc", fontsize=10, loc="left")
+    ax_equity.set_ylabel("P&L ($)", color="#aaa", fontsize=9)
+    ax_equity.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
+    plt.setp(ax_equity.get_xticklabels(), rotation=15, ha="right", fontsize=7, color="#aaa")
+
+    # Stats table
+    wins     = [rt for rt in round_trips if rt["pnl"] > 0]
+    losses   = [rt for rt in round_trips if rt["pnl"] <= 0]
+    total    = sum(rt["pnl"] for rt in round_trips)
+    avg_hold = sum(rt["hold_secs"] for rt in round_trips) / len(round_trips)
+    win_rate = len(wins) / len(round_trips) * 100
+    avg_win  = sum(rt["pnl"] for rt in wins)   / len(wins)   if wins   else 0
+    avg_loss = sum(rt["pnl"] for rt in losses) / len(losses) if losses else 0
+
+    stats = [
+        ["Total trades", str(len(round_trips))],
+        ["Win rate",     f"{win_rate:.1f}%"],
+        ["Total P&L",    f"${total:+.4f}"],
+        ["Avg win",      f"${avg_win:+.4f}"],
+        ["Avg loss",     f"${avg_loss:+.4f}"],
+        ["Avg hold",     f"{int(avg_hold//60)}m {int(avg_hold%60)}s"],
+        ["Winners",      str(len(wins))],
+        ["Losers",       str(len(losses))],
+    ]
+    ax_stats.axis("off")
+    tbl = ax_stats.table(cellText=stats, colLabels=["Metric", "Value"],
+                        cellLoc="left", loc="center", bbox=[0, 0, 1, 1])
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_facecolor("#111827" if r % 2 == 0 else "#0d1117")
+        cell.set_edgecolor("#2a2a2a")
+        cell.set_text_props(color="#ccc")
+    ax_stats.set_title("Summary", color="#ccc", fontsize=10, loc="left", pad=10)
+
+    # Per-symbol table
+    symbols  = sorted(set(rt["symbol"] for rt in round_trips))
+    sym_rows = []
+    for sym in symbols:
+        sym_trades = [rt for rt in round_trips if rt["symbol"] == sym]
+        sym_pnl    = sum(rt["pnl"] for rt in sym_trades)
+        sym_wins   = sum(1 for rt in sym_trades if rt["pnl"] > 0)
+        sym_rows.append([sym, str(len(sym_trades)),
+                        f"${sym_pnl:+.4f}",
+                        f"{sym_wins/len(sym_trades)*100:.0f}%"])
+
+    ax_symbols.axis("off")
+    tbl2 = ax_symbols.table(cellText=sym_rows,
+                            colLabels=["Symbol", "Trades", "P&L", "Win%"],
+                            cellLoc="left", loc="center", bbox=[0, 0, 1, 1])
+    tbl2.auto_set_font_size(False)
+    tbl2.set_fontsize(9)
+    for (r, c), cell in tbl2.get_celld().items():
+        cell.set_facecolor("#111827" if r % 2 == 0 else "#0d1117")
+        cell.set_edgecolor("#2a2a2a")
+        cell.set_text_props(color="#ccc")
+    ax_symbols.set_title("By Symbol", color="#ccc", fontsize=10, loc="left", pad=10)
+
+    fig.text(0.5, 0.95,
+            f"Trading Bot Report — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ha="center", color="#eee", fontsize=13, fontweight="bold")
+    return fig
+
+
+def _make_trade_fig(rt: dict) -> plt.Figure:
+    """One full landscape page per trade — large and readable."""
+    fig = plt.figure(figsize=(16, 9), facecolor="#0d1117")
+    fig.patch.set_facecolor("#0d1117")
+
+    gs = GridSpec(4, 1, figure=fig, hspace=0.08,
+                top=0.88, bottom=0.08, left=0.07, right=0.97)
+    ax_price = fig.add_subplot(gs[:3, 0])
+    ax_pnl   = fig.add_subplot(gs[3, 0], sharex=ax_price)
+
+    plt.setp(ax_price.get_xticklabels(), visible=False)
+    plot_trade(rt, ax_price, ax_pnl)
+    return fig
+
+
+def save_pdf(round_trips: list[dict], custom_name: str | None = None) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out_path = REPORTS_DIR / f"{ts}.pdf"
+
+    if custom_name:
+        out_path = REPORTS_DIR / f"{custom_name}.pdf"
+
+    matplotlib.rcParams["pdf.fonttype"] = 42  # embed fonts
+
+    with PdfPages(out_path) as pdf:
+        # Page 1: summary
+        fig = _make_summary_fig(round_trips)
+        pdf.savefig(fig, facecolor=fig.get_facecolor(), bbox_inches="tight")
+        plt.close(fig)
+
+        # One page per trade
+        for i, rt in enumerate(round_trips):
+            print(f"  [{i+1}/{len(round_trips)}] {rt['symbol']} sell_id={rt['sell_id']}")
+            fig = _make_trade_fig(rt)
+            pdf.savefig(fig, facecolor=fig.get_facecolor(), bbox_inches="tight")
+            plt.close(fig)
+
+        d = pdf.infodict()
+        d["Title"]        = "Trading Bot Report"
+        d["Author"]       = "trade_chart.py"
+        d["Subject"]      = f"{len(round_trips)} round-trips"
+        d["CreationDate"] = datetime.now()
+
+    print(f"\nPDF saved → {out_path}")
+    return out_path
+
+
+# ── Interactive viewer (unchanged) ───────────────────────────────────── #
+
+def plot_all(round_trips: list[dict]):
+    if not round_trips:
+        print("No completed round-trips found.")
+        return
+
+    from matplotlib.widgets import Slider
+
+    n            = len(round_trips)
+    fig_height   = 8
+    total_height = 5 * n
+
+    fig = plt.figure(figsize=(14, fig_height), facecolor="#0d1117")
+    fig.suptitle("Trade Analysis", color="#eee", fontsize=13)
+
+    axes_price = []
+    axes_pnl   = []
+
+    for i, rt in enumerate(round_trips):
+        bottom     = 1 - ((i + 1) * 5) / total_height
+        height     = 3 / total_height
+        pnl_height = 1 / total_height
+
+        ax_price = fig.add_axes([0.08, bottom + pnl_height, 0.85, height])
+        ax_pnl   = fig.add_axes([0.08, bottom, 0.85, pnl_height], sharex=ax_price)
+
+        axes_price.append(ax_price)
+        axes_pnl.append(ax_pnl)
+        plot_trade(rt, ax_price, ax_pnl)
+
+    ax_slider = fig.add_axes([0.95, 0.1, 0.02, 0.8])
+    slider    = Slider(ax_slider, '', 0, total_height - fig_height,
+                    valinit=total_height - fig_height, orientation='vertical')
+
+    def update(val):
+        offset = slider.val / total_height
+        for ax in axes_price + axes_pnl:
+            pos = ax.get_position()
+            ax.set_position([pos.x0, pos.y0 + offset, pos.width, pos.height])
+        fig.canvas.draw_idle()
+
+    slider.on_changed(update)
+    plt.show()
+
+
+# ── CLI ───────────────────────────────────────────────────────────────── #
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize completed trades")
+    parser.add_argument("--symbol",  type=str,            help="Filter by symbol e.g. SOLUSDT")
+    parser.add_argument("--last",    type=int,            help="Show last N completed round-trips")
+    parser.add_argument("--sell-id", type=int,            help="Show trade with this SELL row id")
+    parser.add_argument("--pdf",     action="store_true", help="Save to analysis/reports/<datetime>.pdf")
+    parser.add_argument("--pdf-name", type=str,           help="Save to analysis/reports/<name>.pdf")
+    args = parser.parse_args()
+
+    if not PORTFOLIO_DB.exists():
+        print(f"portfolio.db not found at {PORTFOLIO_DB}")
+        return
+
+    round_trips = load_round_trips(
+        symbol  = args.symbol,
+        last_n  = args.last,
+        sell_id = args.sell_id,
+    )
+
+    print(f"Found {len(round_trips)} completed round-trip(s)")
+    for rt in round_trips:
+        sign = "+" if rt["pnl"] >= 0 else ""
+        print(f"  [{rt['sell_id']:>4}] {rt['symbol']} | "
+            f"avg_entry={rt['avg_entry']:.4f} sell={rt['sell_price']:.4f} | "
+            f"P&L={sign}{rt['pnl']:.4f} ({sign}{rt['pnl_pct']:.2f}%) | "
+            f"DCA levels={rt['dca_levels']} | "
+            f"hold={int(rt['hold_secs']//60)}m{int(rt['hold_secs']%60)}s")
+
+    if not round_trips:
+        return
+
+    if args.pdf:
+        save_pdf(round_trips, custom_name=args.pdf_name)
+    else:
+        plot_all(round_trips)
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== ./app/dashboard.py =====
+from os import path
+import threading
+from time import sleep
+from fastapi import FastAPI
+from pathlib import Path
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.templating import Jinja2Templates
+from log.database import PortfolioDB
+from datetime import datetime
+import uvicorn
+from log.logger import log_uvicorn as log
+from config import SYMBOLS
+from subprocess import run
+
+app = FastAPI()
+
+templates = Jinja2Templates(directory="app/templates")
+
+db : PortfolioDB  # global variable to hold the database connection
+
+from collections import Counter
+import httpx
+
+@app.get("/api/klines")
+async def get_klines(symbol: str, start_time: int): #camel lower only for front-end 
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": symbol,
+        "interval": "1m",
+        "startTime": start_time,
+        "limit": 1000
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
+
+    return response.json()
+
+
+@app.get("/api/price")
+async def get_price(symbol: str):
+    url = "https://api.binance.com/api/v3/ticker/price"
+    params = {"symbol": symbol}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
+
+    return response.json()
+    
+
+def build_portfolio_from_trades(trades):
+    balance = 0.0
+    equity = 0.0
+    trade_history = []
+
+    open_positions = {}
+    
+    for t in trades:
+        trade_id, symbol, side, price, amount, fee, balance_after, sl, tp, timestamp = t
+
+        balance = balance_after
+        equity = balance
+
+        trade_history.append({
+            "id": trade_id,
+            "time": timestamp,
+            "type": side,
+            "symbol": symbol,
+            "qty": amount,
+            "price": price,
+            "expense": (price * amount) / 5,
+            "fee": fee,
+            "balance_after": balance_after,
+            "stop_loss": sl,
+            "take_profit": tp
+        })
+        
+        
+        entry_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        entry_ms = int(entry_dt.timestamp() * 1000)
+
+        # Track open positions
+        if side == "BUY":
+            open_positions[symbol] = {
+                "symbol": symbol,
+                "entry": price,
+                "qty": amount,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "entry_price": price,
+                "entry_time": entry_ms    # milliseconds for frontend - js expects ms instead of date 
+            }
+
+        elif side == "SELL" and symbol in open_positions:
+            del open_positions[symbol]
+            
+            
+
+    return {
+        "balance": balance,
+        "equity": equity,
+        "positions": list(open_positions.values()),
+        "trade_history": trade_history[::-1]
+    }
+    
+
+def build_charts(trade_history):
+    """
+    Build chart data arrays from trade_history.
+    Charts are chronological: oldest trades first.
+    """
+    labels = []
+    equity_curve = []
+    drawdown_curve = []
+    pnl_per_trade = []
+    
+    peak = 0.0
+
+    for trade in reversed(trade_history):  # oldest first
+        labels.append(trade["time"])
+        equity_curve.append(trade["balance_after"])
+
+        # Drawdown % relative to peak
+        peak = max(peak, trade["balance_after"])
+        drawdown_curve.append((trade["balance_after"] - peak) / peak * 100)
+
+        # PnL per trade: approximate using SELL trades
+        if trade["type"] == "SELL":
+            pnl_per_trade.append(trade["balance_after"] - trade["expense"] - trade["fee"])
+
+    # Trade frequency per minute
+    minutes = [t["time"][:16] for t in reversed(trade_history)]  # oldest first
+    counter = Counter(minutes)
+    freq_labels = sorted(counter.keys())
+    freq_data = [counter[m] for m in freq_labels]
+
+    return {
+        "chart_labels": labels,
+        "equity_curve": equity_curve,
+        "drawdown_curve": drawdown_curve,
+        "pnl_per_trade": pnl_per_trade,
+        "trade_freq_labels": freq_labels,
+        "trade_freq": freq_data,
+    }
+
+
+
+@app.get("/")
+def read_dashboard(request: Request):
+    log("\t[GET] dashboard")
+    trades = db.temp_connection.get_all_trades()
+    portfolio = build_portfolio_from_trades(trades)
+    chart_data = build_charts(portfolio["trade_history"])
+
+    log("\t[GET] -> rendering template with portfolio data + chart data")
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "portfolio": portfolio,
+            **chart_data  # unpack chart arrays for Jinja
+        }
+    )
+    
+    
+def generate_trade_chart(pdf_name: str):
+    log("Generating PDF report...")
+    result = run(["python3", "analysis/trade_chart.py", "--pdf", "--pdf-name", pdf_name], capture_output=True, text=True)
+    if result.returncode != 0:
+        log(f"Error generating report: {result.stderr}")
+    else:
+        log("Report generated successfully.")    
+    
+    
+@app.get("/generate_report/")
+def generate_report():
+    ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    pdf_name = f"report_{ts}"
+    pdf_path = Path(f"analysis/reports/{pdf_name}.pdf")
+
+    log(f"Generating PDF report → {pdf_path}")
+    generate_trade_chart(pdf_name=pdf_name)
+    sleep(0.5)
+    if not pdf_path.exists():
+        return HTMLResponse(content="<h1>Error: report generation failed</h1>", status_code=500)
+
+    # Stream the PDF directly to the browser — opens inline in a new tab
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=pdf_path.name,
+        headers={"Content-Disposition": f"inline; filename={pdf_path.name}"}
+    )
+
+
+    
+def start_server(db_obj: PortfolioDB):
+    global db
+    db = db_obj
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+    
+def start_server_in_thread(db_obj: PortfolioDB):
+    server_thread = threading.Thread(target=start_server, args=(db_obj,), daemon=True)
+    server_thread.start()
+
+
+if __name__ == "__main__":
+    
+    db = PortfolioDB()
+    start_server_in_thread(db)
+
+===== ./app/templates/dashboard.html =====
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Bot Dashboard</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <meta http-equiv="refresh" content="5" />
+
+    <style>
+      body {
+        background: radial-gradient(circle at top, #0f172a, #020617);
+      }
+    </style>
+  </head>
+
+  <body class="text-slate-200 min-h-screen">
+    <div class="container mx-auto p-6 space-y-8">
+      <!-- Header -->
+      <div class="flex items-center justify-between">
+        <h1 class="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-500 bg-clip-text text-transparent">Trading Bot Dashboard</h1>
+
+        <a href="/generate_report/" target="_blank">
+          <button class="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-cyan-400/50 transition-all text-sm font-semibold text-cyan-300">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            </svg>Export PDF
+          </button>
+        </a>
+      </div>
+      <!-- ================= Portfolio ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-cyan-300">Portfolio</h2>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="p-4 rounded-xl bg-black/30 border border-white/10">
+            <p class="text-sm text-slate-400">Balance</p>
+            <p class="text-2xl font-bold text-green-400">${{ '%.2f'|format(portfolio.balance) }}</p>
+          </div>
+
+          <div class="p-4 rounded-xl bg-black/30 border border-white/10">
+            <p class="text-sm text-slate-400">Equity</p>
+            <p class="text-2xl font-bold text-purple-400">${{ '%.2f'|format(portfolio.equity) }}</p>
+          </div>
+        </div>
+      </div>
+      <!-- ================= Open Positions ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-green-300">Open Positions</h2>
+
+        {% if portfolio.positions %}
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {% for pos in portfolio.positions %}
+              <div class="bg-black/30 border border-white/10 rounded-xl p-4">
+                <div class="flex justify-between mb-2">
+                  <div>
+                    <p class="text-lg font-bold text-cyan-400">{{ pos.symbol }}</p>
+                    <p class="text-sm text-slate-400">Entry: ${{ '%.2f'|format(pos.entry) }}</p>
+                  </div>
+                  <div class="text-right">
+                    <p class="text-sm text-red-400">SL: ${{ '%.2f'|format(pos.stop_loss) }}</p>
+                    <p class="text-sm text-green-400">TP: ${{ '%.2f'|format(pos.take_profit) }}</p>
+                  </div>
+                </div>
+
+                <canvas id="positionChart{{ loop.index }}" height="320"></canvas>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-slate-400">No open positions</p>
+        {% endif %}
+      </div>
+
+      <!-- ================= Equity Curve ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-lg font-semibold mb-3 text-cyan-300">Equity Curve</h2>
+        <canvas id="equityChart" height="120"></canvas>
+      </div>
+
+      <!-- ================= Drawdown ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-4">
+        <h2 class="text-sm font-semibold mb-2 text-red-300">Drawdown %</h2>
+        <canvas id="drawdownChart" height="60"></canvas>
+      </div>
+
+      <!-- ================= PnL + Frequency ================= -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- PnL Histogram -->
+        <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+          <h2 class="text-lg font-semibold mb-3 text-purple-300">PnL per Trade</h2>
+          <canvas id="pnlChart"></canvas>
+        </div>
+
+        <!-- Trade Frequency -->
+        <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+          <h2 class="text-lg font-semibold mb-3 text-orange-300">Trade Frequency</h2>
+          <canvas id="freqChart"></canvas>
+        </div>
+      </div>
+
+      <!-- ================= Trade History ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-purple-300">Trade History</h2>
+
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="text-left text-slate-400 border-b border-white/10">
+                <th class="px-4 py-3">Time</th>
+                <th class="px-4 py-3">Type</th>
+                <th class="px-4 py-3">Symbol</th>
+                <th class="px-4 py-3">Qty</th>
+                <th class="px-4 py-3">Price</th>
+                <th class="px-4 py-3">Expense</th>
+                <th class="px-4 py-3">Fee</th>
+                <th class="px-4 py-3">Balance After</th>
+              </tr>
+            </thead>
+
+            <tbody class="divide-y divide-white/5">
+              {% for t in portfolio.trade_history %}
+                <tr class="hover:bg-white/5">
+                  <td class="px-4 py-2">{{ t.time }}</td>
+                  <td class="px-4 py-2 font-semibold {% if t.type == 'BUY' %}
+                      
+                      
+                      
+                      
+                      text-green-400
+
+
+
+
+                    {% else %}
+                      
+                      
+                      
+                      
+                      text-red-400
+
+
+
+
+                    {% endif %}">{{ t.type }}</td>
+                  <td class="px-4 py-2 text-cyan-300">{{ t.symbol }}</td>
+                  <td class="px-4 py-2">{{ '%.6f'|format(t.qty) }}</td>
+                  <td class="px-4 py-2">${{ '%.2f'|format(t.price) }}</td>
+                  <td class="px-4 py-2 text-orange-400">${{ '%.2f'|format(t.expense) }}</td>
+                  <td class="px-4 py-2 text-red-400">${{ '%.2f'|format(t.fee) }}</td>
+                  <td class="px-4 py-2 text-green-300">${{ '%.2f'|format(t.balance_after) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= Charts JS ================= -->
+    <script>
+  const openPositions = {{ portfolio.positions | safe }};
+  const labels = {{ chart_labels | default('[]', true) | safe }};
+  const equity = {{ equity_curve | default('[]', true) | safe }};
+  const drawdown = {{ drawdown_curve | default('[]', true) | safe }};
+  const pnl = {{ pnl_per_trade | default('[]', true) | safe }};
+  const freqLabels = {{ trade_freq_labels | default('[]', true) | safe }};
+  const freqData = {{ trade_freq | default('[]', true) | safe }};
+
+  const equityCtx = document.getElementById("equityChart");
+  const drawdownCtx = document.getElementById("drawdownChart");
+  const pnlCtx = document.getElementById("pnlChart");
+  const freqCtx = document.getElementById("freqChart");
+
+  if (equity.length) {
+    new Chart(equityCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          data: equity,
+          borderColor: "#22d3ee",
+          borderWidth: 2,
+          tension: 0.3
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (drawdown.length) {
+    new Chart(drawdownCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          data: drawdown,
+          borderColor: "#f87171",
+          borderWidth: 1,
+          tension: 0.3
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (pnl.length) {
+    new Chart(pnlCtx, {
+      type: "bar",
+      data: {
+        labels: pnl.map((_, i) => i + 1),
+        datasets: [{
+          data: pnl,
+          backgroundColor: pnl.map(v => v >= 0 ? "#22c55e" : "#ef4444")
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (freqData.length) {
+    new Chart(freqCtx, {
+      type: "bar",
+      data: {
+        labels: freqLabels,
+        datasets: [{
+          data: freqData,
+          backgroundColor: "#fb923c"
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  async function fetchKlines(symbol, startTime) {
+    const response = await fetch(
+      `/api/klines?symbol=${symbol}&start_time=${startTime}`
+    );
+    return await response.json();
+  }
+
+  async function fetchCurrentPrice(symbol) {
+    const response = await fetch(
+      `/api/price?symbol=${symbol}`
+    );
+    const data = await response.json();
+    return parseFloat(data.price);
+  }
+
+  function createPositionChart(ctx, labels, prices, entry, sl, tp) {
+    return new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Price",
+            data: prices,
+            borderColor: "#22d3ee",
+            borderWidth: 2,
+            tension: 0.2,
+            pointRadius: 0
+          },
+          {
+            label: "Entry",
+            data: labels.map(() => entry),
+            borderColor: "#a78bfa",
+            borderDash: [5, 5],
+            pointRadius: 0
+          },
+          {
+            label: "Stop Loss",
+            data: labels.map(() => sl),
+            borderColor: "#ef4444",
+            borderDash: [5, 5],
+            pointRadius: 0
+          },
+          {
+            label: "Take Profit",
+            data: labels.map(() => tp),
+            borderColor: "#22c55e",
+            borderDash: [5, 5],
+            pointRadius: 0
+          }
+        ]
+      },
+      options: {
+        animation: false,
+        scales: {
+          x: { ticks: { color: "#94a3b8" }},
+          y: { ticks: { color: "#94a3b8" }}
+        },
+        plugins: {
+          legend: { labels: { color: "#94a3b8" }}
+        }
+      }
+    });
+  }
+
+  async function initPositionCharts() {
+    if (!openPositions.length) return;
+
+    openPositions.forEach(async (pos, index) => {
+      const ctx = document.getElementById(`positionChart${index + 1}`);
+
+      const symbol = pos.symbol.replace("/", "");
+      const entryTime = pos.entry_time;
+
+      const klines = await fetchKlines(symbol, entryTime);
+
+      const labels = klines.map(k => {
+        const date = new Date(k[0]);
+        return date.toLocaleTimeString();
+      });
+
+      const prices = klines.map(k => parseFloat(k[4])); // close price
+
+      const chart = createPositionChart(
+        ctx,
+        labels,
+        prices,
+        pos.entry,
+        pos.stop_loss,
+        pos.take_profit
+      );
+
+      // 🔥 LIVE UPDATING LOOP
+      setInterval(async () => {
+        const currentPrice = await fetchCurrentPrice(symbol);
+        const nowLabel = new Date().toLocaleTimeString();
+
+        chart.data.labels.push(nowLabel);
+        chart.data.datasets[0].data.push(currentPrice);
+
+        // extend horizontal lines
+        chart.data.datasets[1].data.push(pos.entry);
+        chart.data.datasets[2].data.push(pos.stop_loss);
+        chart.data.datasets[3].data.push(pos.take_profit);
+
+        chart.update();
+      }, 5000); // update every 5s
+    });
+  }
+
+  initPositionCharts();
+</script>
+  </body>
+</html>
+
+
+===== ./architecture/folder-structure.txt =====
+bot/
+├── data/
+│   └── market_stream.py
+├── strategy/
+│   ├── indicators.py
+│   ├── signals.py
+│   └── ml_model.py
+├── risk/
+│   └── position_sizing.py
+├── execution/
+│   └── binance_client.py
+├── config.py
+└── main.py
+
+===== ./architecture/requirements.txt =====
+python-binance
+pandas
+numpy
+pandas-ta
+asyncio
+dotenv
+fastapi
+uvicorn
+jinja2
+matplotlib
+httpx
+
+===== ./config-backups-by-report/26.02.2026/26.02.2026 - config.py =====
+LOG_FILE         = "./log/log.txt"
+UVICORN_LOG_FILE = "./log/uvicorn_log.txt"
+POSITIONS_LOG_CSV_FILE = "./log/positions_log.csv"
+LOG_PRICE_RECORDER_FILE = "./log/price_recorder_log.txt"
+
+# ── Paper trading ──────────────────────────────────────────────────────── #
+PAPER_TRADING = True
+START_BALANCE = 100.0
+FEE_RATE      = 0.001    # 0.1% Binance spot fee
+LEVERAGE      = 1.0      # spot only
+
+# ── Symbols ────────────────────────────────────────────────────────────── #
+DCA_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+]
+SYMBOLS = DCA_SYMBOLS
+
+# ── Loop timing ────────────────────────────────────────────────────────── #
+INTERVAL       = "5m"
+SLEEP_INTERVAL = 10      # seconds between iterations
+
+# ── DCA entry structure ────────────────────────────────────────────────── #
+DCA_DROP_STEP_PCT       = 2.0   # trigger a new buy every X% drop from 24h high
+                                # 1.0 = very frequent, 3.0 = only on real dips
+DCA_MAX_SPEND_PER_LEVEL = 10.0  # max $ per DCA trigger (spend = drop_pct, capped here)
+DCA_COOLDOWN_SECONDS    = 300   # seconds to wait after any exit before re-entering
+DCA_HIGH_LOOKBACK_CANDLES = 72  # 12 × 5m = 1h  |  288 = 24h  |  72 = 6h - max 24 hrs
+
+# ── Exit config ────────────────────────────────────────────────────────── #
+TAKE_PROFIT_MULTIPLIER = 4.0    # ATR multiples above avg entry
+STOP_LOSS_MULTIPLIER   = 1.8    # ATR multiples below avg entry
+BREAKEVEN_TRIGGER_PCT = 0.008  # 0.8% profit before break-even activates
+
+# Trailing stop — give the position room to run
+TRAIL_START_PCT    = 0.015      # start trailing after 1.5% profit 
+TRAIL_DISTANCE_PCT = 0.008      # trail 0.8% below peak 
+
+# ── Indicator lengths ──────────────────────────────────────────────────── #
+# Short-term momentum EMAs (5m)
+EMA_FAST        = 9
+EMA_SLOW        = 21
+
+# Higher-timeframe trend proxy (5m)
+EMA_TREND_FAST  = 50
+EMA_TREND_SLOW  = 200
+
+RSI_LENGTH      = 14
+ATR_LENGTH      = 14
+VOL_MA_LENGTH   = 20
+
+# MACD
+MACD_FAST       = 12
+MACD_SLOW       = 26
+MACD_SIGNAL     = 9
+
+# Bollinger Bands
+BB_LENGTH       = 20
+BB_STD          = 2
+
+# ── Entry quality filters ──────────────────────────────────────────────── #
+# Confluence score: 4 signals available (EMA, RSI, Volume, MACD) + 1 bonus (BB)
+# Set to 2 for more trades, 3 for balanced, 4 for very selective
+MIN_CONFLUENCE_SCORE = 3
+
+# RSI zones
+RSI_BULL_ZONE   = 55    # above = bull momentum zone
+RSI_MAX         = 75    # above = overbought, skip
+RSI_OVERSOLD    = 45    # below = washed out (counts as RSI signal)
+
+# Volume
+VOLUME_SPIKE_MULT = 1.5  # volume must be this × 20-period average
+
+# Bollinger Band squeeze threshold (bb_width = (upper-lower)/mid)
+BB_SQUEEZE_THRESHOLD = 0.02   # below this = squeeze, breakout above upper = signal
+
+# Macro trend gate: if True, skips ALL entries when EMA50 < EMA200
+# Set False to allow counter-trend DCA entries (riskier but more frequent)
+HTF_TREND_REQUIRED = False
+
+# ── ATR edge ───────────────────────────────────────────────────────────── #
+MIN_EDGE_PCT    = 0.001  # minimum expected move above fees
+
+
+# For testing less strict entry conditions (e.g. for backtesting or more frequent trades)
+LESS_STRICT_SHOULD_LONG = False
+
+===== ./config-backups-by-report/27.02.2026 - safe/config.py =====
+LOG_FILE         = "./log/log.txt"
+UVICORN_LOG_FILE = "./log/uvicorn_log.txt"
+POSITIONS_LOG_CSV_FILE = "./log/positions_log.csv"
+LOG_PRICE_RECORDER_FILE = "./log/price_recorder_log.txt"
+
+# ── Paper trading ──────────────────────────────────────────────────────── #
+PAPER_TRADING = True
+START_BALANCE = 100.0
+FEE_RATE      = 0.001    # 0.1% Binance spot fee
+LEVERAGE      = 3.0      # spot only
+
+# ── Symbols ────────────────────────────────────────────────────────────── #
+DCA_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+]
+SYMBOLS = DCA_SYMBOLS
+
+# ── Loop timing ────────────────────────────────────────────────────────── #
+INTERVAL       = "5m"
+SLEEP_INTERVAL = 10      # seconds between iterations
+
+# ── DCA entry structure ────────────────────────────────────────────────── #
+DCA_DROP_STEP_PCT       = 1.5   # trigger a new buy every X% drop from DCA_HIGH_LOOKBACK_CANDLES / 12 high
+                                # 1.0 = very frequent, 3.0 = only on real dips
+DCA_MAX_SPEND_PER_LEVEL = 15.0  # max $ per DCA trigger (spend = drop_pct, capped here)
+DCA_COOLDOWN_SECONDS    = 180   # seconds to wait after any exit before re-entering
+DCA_HIGH_LOOKBACK_CANDLES = 24  # 12 × 5m = 1h  |  288 = 24h  |  72 = 6h - max 24 hrs
+
+# ── Exit config ────────────────────────────────────────────────────────── #
+TAKE_PROFIT_MULTIPLIER = 6.0    # ATR multiples above avg entry
+STOP_LOSS_MULTIPLIER   = 3.0    # ATR multiples below avg entry
+BREAKEVEN_TRIGGER_PCT = 0.012  # 0.8% profit before break-even activates
+
+# Trailing stop — give the position room to run
+TRAIL_START_PCT    = 0.020      # start trailing after x% profit 
+TRAIL_DISTANCE_PCT = 0.010      # trail x% below peak 
+
+# ── Accelerating trail ─────────────────────────────────────────────────── #
+# As profit grows, trail tightens to lock in gains
+# Format: (min_profit_pct, trail_distance_pct) — checked top to bottom
+TRAIL_TIERS = [
+    (0.05, 0.003),   # 5%+ profit  → trail 0.3% below peak (very tight)
+    (0.03, 0.005),   # 3-5% profit → trail 0.5% below peak
+    (0.015, 0.008),  # 1.5-3%      → trail 0.8% below peak (normal)
+]
+# Below the first tier threshold → no trailing, just base SL
+
+# ── Indicator lengths ──────────────────────────────────────────────────── #
+# Short-term momentum EMAs (5m)
+EMA_FAST        = 9
+EMA_SLOW        = 21
+
+# Higher-timeframe trend proxy (5m)
+EMA_TREND_FAST  = 50
+EMA_TREND_SLOW  = 200
+
+RSI_LENGTH      = 14
+ATR_LENGTH      = 14
+VOL_MA_LENGTH   = 20
+
+# MACD
+MACD_FAST       = 12
+MACD_SLOW       = 26
+MACD_SIGNAL     = 9
+
+# Bollinger Bands
+BB_LENGTH       = 20
+BB_STD          = 2
+
+# ── Entry quality filters ──────────────────────────────────────────────── #
+# Confluence score: 4 signals available (EMA, RSI, Volume, MACD) + 1 bonus (BB)
+# Set to 2 for more trades, 3 for balanced, 4 for very selective
+MIN_CONFLUENCE_SCORE = 2
+
+# RSI zones
+RSI_BULL_ZONE   = 55    # above = bull momentum zone
+RSI_MAX         = 75    # above = overbought, skip
+RSI_OVERSOLD    = 45    # below = washed out (counts as RSI signal)
+
+# Volume
+VOLUME_SPIKE_MULT = 1.5  # volume must be this × 20-period average
+
+# Bollinger Band squeeze threshold (bb_width = (upper-lower)/mid)
+BB_SQUEEZE_THRESHOLD = 0.02   # below this = squeeze, breakout above upper = signal
+
+# Macro trend gate: if True, skips ALL entries when EMA50 < EMA200
+# Set False to allow counter-trend DCA entries (riskier but more frequent)
+HTF_TREND_REQUIRED = False
+
+# ── ATR edge ───────────────────────────────────────────────────────────── #
+MIN_EDGE_PCT    = 0.002  # minimum expected move above fees
+
+
+# For testing less strict entry conditions (e.g. for backtesting or more frequent trades)
+LESS_STRICT_SHOULD_LONG = True
+
+===== ./config.py =====
+LOG_FILE         = "./log/log.txt"
+UVICORN_LOG_FILE = "./log/uvicorn_log.txt"
+POSITIONS_LOG_CSV_FILE = "./log/positions_log.csv"
+LOG_PRICE_RECORDER_FILE = "./log/price_recorder_log.txt"
+
+# ── Paper trading ──────────────────────────────────────────────────────── #
+PAPER_TRADING = True
+START_BALANCE = 100.0
+FEE_RATE      = 0.001    # 0.1% Binance spot fee
+LEVERAGE      = 3.0      # spot only
+
+# ── Symbols ────────────────────────────────────────────────────────────── #
+DCA_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+]
+SYMBOLS = DCA_SYMBOLS
+
+# ── Loop timing ────────────────────────────────────────────────────────── #
+INTERVAL       = "5m"
+SLEEP_INTERVAL = 10      # seconds between iterations
+
+# ── DCA entry structure ────────────────────────────────────────────────── #
+DCA_DROP_STEP_PCT       = 0.5   # trigger a new buy every X% drop from DCA_HIGH_LOOKBACK_CANDLES / 12 high
+                                # 1.0 = very frequent, 3.0 = only on real dips
+DCA_MAX_SPEND_PER_LEVEL = 15.0  # max $ per DCA trigger (spend = drop_pct, capped here)
+DCA_COOLDOWN_SECONDS    = 180   # seconds to wait after any exit before re-entering
+DCA_HIGH_LOOKBACK_CANDLES = 12  # 12 × 5m = 1h  |  288 = 24h  |  72 = 6h - max 24 hrs
+
+# ── Exit config ────────────────────────────────────────────────────────── #
+TAKE_PROFIT_MULTIPLIER = 6.0    # ATR multiples above avg entry
+STOP_LOSS_MULTIPLIER   = 3.0    # ATR multiples below avg entry
+BREAKEVEN_TRIGGER_PCT = 0.012  # 0.8% profit before break-even activates
+
+# Trailing stop — give the position room to run
+TRAIL_START_PCT    = 0.020      # start trailing after x% profit 
+TRAIL_DISTANCE_PCT = 0.010      # trail x% below peak 
+
+# ── Accelerating trail ─────────────────────────────────────────────────── #
+# As profit grows, trail tightens to lock in gains
+# Format: (min_profit_pct, trail_distance_pct) — checked top to bottom
+TRAIL_TIERS = [
+    (0.05, 0.003),   # 5%+ profit  → trail 0.3% below peak (very tight)
+    (0.03, 0.005),   # 3-5% profit → trail 0.5% below peak
+    (0.015, 0.008),  # 1.5-3%      → trail 0.8% below peak (normal)
+]
+# Below the first tier threshold → no trailing, just base SL
+
+# ── Indicator lengths ──────────────────────────────────────────────────── #
+# Short-term momentum EMAs (5m)
+EMA_FAST        = 9
+EMA_SLOW        = 21
+
+# Higher-timeframe trend proxy (5m)
+EMA_TREND_FAST  = 50
+EMA_TREND_SLOW  = 200
+
+RSI_LENGTH      = 14
+ATR_LENGTH      = 14
+VOL_MA_LENGTH   = 20
+
+# MACD
+MACD_FAST       = 12
+MACD_SLOW       = 26
+MACD_SIGNAL     = 9
+
+# Bollinger Bands
+BB_LENGTH       = 20
+BB_STD          = 2
+
+# ── Entry quality filters ──────────────────────────────────────────────── #
+# Confluence score: 4 signals available (EMA, RSI, Volume, MACD) + 1 bonus (BB)
+# Set to 2 for more trades, 3 for balanced, 4 for very selective
+MIN_CONFLUENCE_SCORE = 1
+
+# RSI zones
+RSI_BULL_ZONE   = 55    # above = bull momentum zone
+RSI_MAX         = 75    # above = overbought, skip
+RSI_OVERSOLD    = 45    # below = washed out (counts as RSI signal)
+
+# Volume
+VOLUME_SPIKE_MULT = 1.5  # volume must be this × 20-period average
+
+# Bollinger Band squeeze threshold (bb_width = (upper-lower)/mid)
+BB_SQUEEZE_THRESHOLD = 0.02   # below this = squeeze, breakout above upper = signal
+
+# Macro trend gate: if True, skips ALL entries when EMA50 < EMA200
+# Set False to allow counter-trend DCA entries (riskier but more frequent)
+HTF_TREND_REQUIRED = False
+
+# ── ATR edge ───────────────────────────────────────────────────────────── #
+MIN_EDGE_PCT    = 0.002  # minimum expected move above fees
+
+
+# For testing less strict entry conditions (e.g. for backtesting or more frequent trades)
+LESS_STRICT_SHOULD_LONG = True
+
+===== ./data/market_stream.py =====
+
+
+===== ./display_sqllight_table.py =====
+import sqlite3
+
+
+
+with sqlite3.connect("./log/db/portfolio.db") as conn:
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, symbol, side, price, amount, fee, balance_after, sl, tp, timestamp
+        FROM trades
+        ORDER BY id ASC
+    """)
+    print(cursor.fetchall())
+
+===== ./execution/binance_client.py =====
+from binance.client import Client
+
+class BinanceClient:
+    def __init__(self, api_key, api_secret):
+        self.client = Client(api_key, api_secret)
+
+    def market_buy(self, symbol, qty):
+        return self.client.order_market_buy(
+            symbol=symbol,
+            quantity=qty
+        )
+
+    def market_sell(self, symbol, qty):
+        return self.client.order_market_sell(
+            symbol=symbol,
+            quantity=qty
+        )
+
+    def balance(self, asset="USDT"):
+        balances = self.client.get_asset_balance(asset)
+        return float(balances["free"])
+
+===== ./log/database.py =====
+import sqlite3
+from pathlib import Path
+from log.logger import log
+
+DB_PATH = Path("log/db/portfolio.db")
+
+
+class TempConnection:
+    """Thread-safe read-only queries."""
+
+    @staticmethod
+    def get_all_trades():
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, symbol, side, price, amount, fee, balance_after, sl, tp, timestamp
+                FROM trades ORDER BY id ASC
+            """)
+            return cursor.fetchall()
+
+    @staticmethod
+    def get_last_trade(symbol: str):
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT side, price, amount, balance_after, timestamp, sl, tp
+                FROM trades WHERE symbol = ?
+                ORDER BY id DESC LIMIT 1
+            """, (symbol,))
+            return cursor.fetchone()
+
+
+class PortfolioDB:
+    def __init__(self):
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self._create_tables()
+        self.temp_connection = TempConnection()
+        log(f"Database initialized at {DB_PATH}")
+
+    def _create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol       TEXT    NOT NULL,
+                side         TEXT    NOT NULL,
+                price        REAL    NOT NULL,
+                amount       REAL    NOT NULL,
+                fee          REAL    NOT NULL,
+                balance_after REAL   NOT NULL,
+                sl           REAL    DEFAULT 0.0,
+                tp           REAL    DEFAULT 0.0,
+                timestamp    TEXT    DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        self.conn.commit()
+
+    def log_trade(self, symbol, side, price, amount, fee, balance_after, sl=0.0, tp=0.0):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO trades (symbol, side, price, amount, fee, balance_after, sl, tp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, side, price, amount, fee, balance_after, sl, tp))
+        self.conn.commit()
+        log(f"DB | {side} | {symbol} | price={price:.4f} qty={amount:.6f} fee={fee:.4f} balance={balance_after:.2f}")
+
+    def close(self):
+        self.conn.close()
+
+
+===== ./log/db/struct.txt =====
+symbol   (BTCUSDT, ETHUSDT, etc)
+side
+price
+amount
+fee
+balance_after
+timestamp
+
+===== ./log/log.txt =====
+
+
+===== ./log/logger.py =====
+
+
+from datetime import datetime
+import inspect
+from typing import List
+import os
+from config import LOG_FILE, UVICORN_LOG_FILE, POSITIONS_LOG_CSV_FILE, LOG_PRICE_RECORDER_FILE
+
+import csv
+
+def log(*msg: str | int | float) -> None:
+    """
+    Logs messages to log.txt, prepending:
+    - timestamp with milliseconds
+    - file name
+    - function name
+    - line number
+    """
+
+    # Caller info (1 level up the stack)
+    frame = inspect.stack()[1]
+    file_name = os.path.basename(frame.filename)
+    func_name = frame.function
+    line_no = frame.lineno
+
+    # Timestamp
+    time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    # Prefix
+    prefix = (
+        f"[{time_str}]\t"
+        f"[{file_name} - {func_name}():{line_no}]\t\t"
+    )
+
+    # Write log
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        for m in msg:
+            f.write(f"{prefix}{m}\n")
+
+
+def log_uvicorn(msg: str) -> None:
+    """
+    Logs messages to log.txt, prepending uvicorn tag.
+    """
+
+    # Timestamp
+    time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    # Prefix
+    prefix = f"[{time_str}]\t[uvicorn]\t\t"
+
+    # Write log
+    with open(UVICORN_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{prefix}{msg}\n")
+        
+
+def log_price_recorder(msg: str) -> None:
+    """
+    Logs messages to log.txt, prepending price_recorder tag.
+    """
+
+    # Timestamp
+    time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    # Prefix
+    prefix = f"[{time_str}]\t[price_recorder]\t\t"
+
+    # Write log
+    with open(LOG_PRICE_RECORDER_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{prefix}{msg}\n")
+
+
+
+class LogPosition:
+    """
+    Logs position entries/exits to positions_log.csv as proper CSV rows.
+    Header (already in file): symbol,side,timestamp,price,qty,average_entry_price,balance
+    """
+
+    @staticmethod
+    def buy(symbol: str, price: float, qty: float, avg_entry: float, balance: float) -> None:
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(POSITIONS_LOG_CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([symbol, "BUY", time_str, price, qty, avg_entry, balance])
+
+    @staticmethod
+    def sell(symbol: str, price: float, qty: float, avg_entry: float, balance: float) -> None:
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(POSITIONS_LOG_CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([symbol, "SELL", time_str, price, qty, avg_entry, balance])
+
+log_position = LogPosition()
+
+===== ./log/price_recorder_log.txt =====
+
+
+===== ./log/uvicorn_log.txt =====
+
+
+
+===== ./main.py =====
+"""
+DCA Branch — main.py
+────────────────────
+Strategy:
+- Track the 24h high for each symbol every loop.
+- Every time price drops another DCA_DROP_STEP_PCT% from the 24h high,
+buy $drop_pct worth (e.g. 3% drop → $3, 4% drop → $4).
+- Exit logic: trailing stop from exits.py (applied to avg entry price).
+- No leverage. Spot only. 3 symbols. $100 balance.
+
+Bugs fixed vs previous version:
+1. After a SELL, entry check now skips via `continue` — no same-tick rebuy.
+2. dca_state is reset inside sell() already; main.py no longer double-updates it.
+3. dca_state["last_trigger_pct"] is updated inside buy() only — single source of truth.
+"""
+
+from dotenv import load_dotenv
+import os, time
+import pandas as pd
+from binance.client import Client
+import requests.exceptions
+
+load_dotenv()
+API_KEY    = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+
+from config import *
+from strategy.indicators import add_indicators
+from strategy.logic import should_long_dca
+from strategy.exits import should_exit, reset_symbol
+from paper.portfolio import PaperPortfolio
+from log.logger import log
+from log.database import PortfolioDB
+from app.dashboard import start_server_in_thread
+from analysis.price_recorder import start_price_recorder
+
+log("Starting DCA bot...")
+
+binance     = Client(API_KEY, API_SECRET)
+portfolioDB = PortfolioDB()
+portfolio   = PaperPortfolio(starting_balance=START_BALANCE, db_obj=portfolioDB, leverage=LEVERAGE)
+
+log(f"DCA Portfolio ready — balance={portfolio.balance:.2f}, symbols={list(portfolio.symbols.keys())}")
+
+start_server_in_thread(portfolioDB)
+
+banner = r"""
+██████╗  ██████╗ █████╗     ██████╗  ██████╗ ████████╗
+██╔══██╗██╔════╝██╔══██╗    ██╔══██╗██╔═══██╗╚══██╔══╝
+██║  ██║██║     ███████║    ██████╔╝██║   ██║   ██║   
+██║  ██║██║     ██╔══██║    ██╔══██╗██║   ██║   ██║   
+██████╔╝╚██████╗██║  ██║    ██████╔╝╚██████╔╝   ██║   
+╚═════╝  ╚═════╝╚═╝  ╚═╝    ╚═════╝  ╚═════╝    ╚═╝   
+"""
+print(banner)
+
+# Price recorder thread — records 1m candles for all symbols to a local SQLite DB for later analysis and dashboard display
+log("Starting price recorder thread...")
+start_price_recorder(binance, DCA_SYMBOLS)
+
+if LESS_STRICT_SHOULD_LONG: #! FOR TESTING ONLY: skips all gates except, and ignores HTF bias even if required. Use to generate more trades and test exit logic.
+    log("WARNING: LESS_STRICT_SHOULD_LONG is ENABLED — this is for testing only and will generate more trades by skipping all gates except DCA level, and ignoring HTF bias even if required.")
+    print("WARNING: LESS_STRICT_SHOULD_LONG is ENABLED — this is for testing only and will generate more trades by skipping all gates except DCA level, and ignoring HTF bias even if required.")
+
+# ─────────────────────────────────────────────────────────────────────── #
+#  Main loop                                                               #
+# ─────────────────────────────────────────────────────────────────────── #
+while True:
+    try:
+        for symbol_name, symbol in portfolio.symbols.items():
+            log(f"── Processing {symbol_name} ──")
+
+            # ── 1. Fetch klines (5m, 300 candles = ~25h) ──────────────── #
+            
+            klines = binance.get_klines(
+                symbol=symbol_name,
+                interval=Client.KLINE_INTERVAL_5MINUTE,
+                limit=300
+            )
+            df = pd.DataFrame(klines, columns=[
+                "time","open","high","low","close","volume",
+                "_","_","_","_","_","_"
+            ]).astype({"open": float,"high": float,"low": float,"close": float,"volume": float})
+
+            df = add_indicators(df)
+            last = df.iloc[-1]
+
+            # ── 2. 24h high from fetched data ──────────────────────────── #
+            high = df["high"].iloc[-DCA_HIGH_LOOKBACK_CANDLES:].max()
+            symbol._last_high = high
+            current_price = last.close
+
+            log(f"{symbol_name} — price={current_price:.4f}, {DCA_HIGH_LOOKBACK_CANDLES/12}hours high={high:.4f}, atr={last.atr:.6f}")
+
+            # ── 3. Exit logic ──────────────────────────────────────────── #
+            if symbol.in_position():
+                if symbol.check_liquidation(current_price):
+                    log(f"[LIQUIDATION] {symbol_name} @ {current_price:.4f}")
+                    symbol.sell(current_price, FEE_RATE)
+                    reset_symbol(symbol_name)
+                    continue  # skip entry check this tick
+
+                exit_reason = should_exit(
+                    symbol.entry_price,
+                    symbol,
+                    current_price,
+                    last.atr,
+                    symbol_name
+                )
+                if exit_reason:
+                    log(f"[EXIT {exit_reason.upper()}] {symbol_name} @ {current_price:.4f}")
+                    symbol.sell(current_price, FEE_RATE)
+                    reset_symbol(symbol_name)
+                    print(f"[SELL {exit_reason.upper()}] {symbol_name} @ {current_price:.4f} | Balance: {portfolio.balance:.2f}")
+                    continue
+
+            # ── 4. DCA Entry logic ─────────────────────────────────────── #
+            free_balance = portfolio.balance - portfolio.used_margin
+            if free_balance < 0.5:
+                log(f"{symbol_name} — no free balance ({free_balance:.2f}), skipping entry")
+                continue
+
+            # Cooldown after exit — don't rebuy immediately
+            if time.time() < symbol.cooldown_until:
+                remaining = symbol.cooldown_until - time.time()
+                log(f"{symbol_name} — cooldown active ({remaining:.0f}s remaining), skipping entry")
+                continue
+
+            should_buy, spend_usd = should_long_dca(
+                current_price=current_price,
+                high=high,
+                symbol_state=symbol.dca_state,
+                df = df
+            )
+
+            if should_buy:
+                ok = symbol.buy(current_price, spend_usd, high, last.atr, fee_rate = FEE_RATE)
+                if ok:
+                    print(
+                        f"[DCA BUY #{symbol.dca_levels}] {symbol_name} @ {current_price:.4f} | "
+                        f"Spent ${spend_usd:.2f} | Avg entry={symbol.average_entry_price:.4f} | "
+                        f"Total pos={symbol.position:.6f} | Balance: {portfolio.balance:.2f}"
+                    )
+
+        log(f"── Sleeping {SLEEP_INTERVAL}s ──")
+        time.sleep(SLEEP_INTERVAL)
+
+    except requests.exceptions.ReadTimeout as e:
+        log(f"Connection timeout error")
+        time.sleep(5)
+    except requests.exceptions.ConnectionError as e:
+        log(f"Connection error")
+        time.sleep(5)
+    except Exception as e:
+        log(f"Error in main loop: {e}")
+        import traceback
+        log(traceback.format_exc())
+        print(f"Error: {e}")
+        time.sleep(5)
+
+===== ./paper/portfolio.py =====
+from config import DCA_SYMBOLS, DCA_COOLDOWN_SECONDS
+from log.logger import log, log_position
+from log.database import PortfolioDB
+from time import time
+
+from strategy.exits import get_tp_sl
+
+class PaperPortfolio:
+    def __init__(self, starting_balance: float = 100.0, db_obj: PortfolioDB | None = None, leverage: float = 1.0):
+        self.balance     = starting_balance
+        self.used_margin = 0.0
+        self.db          = db_obj
+        self.leverage    = leverage
+
+        self.symbols = {
+            symbol: DCASymbol(symbol, self, leverage, db_obj)
+            for symbol in DCA_SYMBOLS
+        }
+        log(f"[DCA] PaperPortfolio created — balance={self.balance:.2f}, symbols={list(self.symbols.keys())}")
+
+
+class DCASymbol:
+    """
+    Tracks a DCA position for a single symbol.
+    Supports multiple buy entries and computes a true weighted average entry price.
+
+    Bugs fixed:
+    - buy() is now the single place that updates dca_state["last_trigger_pct"]
+    - sell() resets all state correctly (was already correct, confirmed)
+    - log_position.buy/sell now log avg_entry which is always the weighted average
+    """
+
+    def __init__(self, symbol: str, portfolio: PaperPortfolio, leverage: float, db_obj: PortfolioDB | None = None):
+        self.name      = symbol
+        self.symbol    = symbol
+        self.portfolio = portfolio
+        self.leverage  = leverage
+        self.db        = db_obj
+
+        self._last_high: float = 0.0  # set by main loop each tick
+
+        self._reset_position()
+
+    def _reset_position(self):
+        """Reset all position state. Called on init and after full sell."""
+        self.position: float            = 0.0
+        self.portfolio.used_margin: float = 0.0
+        self.total_cost: float          = 0.0   # cumulative net USDT spent (excl. fee)
+        self.average_entry_price: float = 0.0
+        self.entry_price: float         = 0.0   # first entry price (for exits.py compat)
+        self.dca_levels: int            = 0
+        self.dca_state: dict            = {"last_trigger_pct": 0.0}
+        self.cooldown_until: float      = 0.0   # timestamp until which new entries are blocked after a sell
+
+    # ------------------------------------------------------------------ #
+    #  Queries                                                             #
+    # ------------------------------------------------------------------ #
+
+    def in_position(self) -> bool:
+        return self.position > 0
+
+    def unrealized_pnl(self, current_price: float) -> float:
+        if not self.in_position():
+            return 0.0
+        return (current_price - self.average_entry_price) * self.position
+
+    # ------------------------------------------------------------------ #
+    #  DCA Buy                                                             #
+    # ------------------------------------------------------------------ #
+
+    def buy(self, price: float, spend_usd: float, high_24h: float, atr: float, fee_rate: float = 0.001) -> bool:
+        """
+        Buy `spend_usd` worth of the asset at `price`.
+        Updates the weighted average entry price across all DCA levels.
+        Updates dca_state so the next level is tracked correctly.
+        """
+        free_balance = self.portfolio.balance - self.portfolio.used_margin
+
+        if spend_usd > free_balance:
+            spend_usd = free_balance
+            if spend_usd < 0.5:
+                log(f"[DCA] {self.symbol} — not enough free balance ({free_balance:.2f}), skipping")
+                return False
+
+        notional = spend_usd * self.leverage
+        fee = notional * fee_rate
+        qty = (notional - fee) / price  # units received after fee
+
+        # Deduct from portfolio
+        self.portfolio.balance -= spend_usd + spend_usd*fee_rate  # deduct spend + fee from balance
+        self.portfolio.used_margin += spend_usd - spend_usd*fee_rate  # deduct spend + fee from balance
+
+        # Accumulate cost and units for correct weighted average
+        self.total_cost          += notional - fee   # net cost (what we'd recover at avg_entry)
+        self.position            += qty
+        self.average_entry_price  = self.total_cost / self.position
+        self.dca_levels          += 1
+
+        if self.dca_levels == 1:
+            self.entry_price = price  # first entry — used by exits.py
+
+        if high_24h > 0:
+            drop_pct = (high_24h - price) / high_24h * 100
+            self.dca_state["last_trigger_pct"] = drop_pct
+            self._last_high = high_24h
+
+        log(
+            f"[DCA BUY #{self.dca_levels}] {self.symbol} | "
+            f"price={price:.4f} spend=${spend_usd:.2f} qty={qty:.6f} fee={fee:.4f} | "
+            f"avg_entry={self.average_entry_price:.4f} total_pos={self.position:.6f} | "
+            f"balance={self.portfolio.balance:.2f}"
+        )
+        log_position.buy(self.symbol, price, qty, self.average_entry_price, self.portfolio.balance)
+        sl, tp = get_tp_sl(self.average_entry_price, price, atr=atr) 
+        if self.db:
+            self.db.log_trade(
+                symbol=self.symbol,
+                side="BUY",
+                price=price,
+                amount=qty,
+                fee=fee,
+                balance_after=self.portfolio.balance,
+                sl=sl,
+                tp=tp,
+            )
+        return True
+
+    # ------------------------------------------------------------------ #
+    #  Sell (full position)                                                #
+    # ------------------------------------------------------------------ #
+
+    def sell(self, price: float, fee_rate: float = 0.001):
+        if not self.in_position():
+            return
+
+        qty_sold       = self.position
+        avg_entry_sold = self.average_entry_price
+        notional       = qty_sold * price
+        fee            = notional * fee_rate
+        pnl            = (price - avg_entry_sold) * qty_sold - fee
+
+        # margin locked was spend_usd per buy — stored in total_cost / leverage
+        margin_used = self.total_cost / self.leverage
+
+        # return margin + leveraged pnl (can go negative = loss bigger than margin)
+        self.portfolio.balance     += margin_used + pnl
+        self.portfolio.used_margin -= margin_used
+
+        log(
+            f"[DCA SELL] {self.symbol} | "
+            f"price={price:.4f} qty={qty_sold:.6f} avg_entry={avg_entry_sold:.4f} | "
+            f"profit={pnl:.2f} fee={fee:.4f} dca_levels={self.dca_levels} | "
+            f"balance={self.portfolio.balance:.2f}"
+        )
+        
+        log_position.sell(self.symbol, price, qty_sold, avg_entry_sold, self.portfolio.balance)
+
+        if self.db:
+            self.db.log_trade(
+                symbol=self.symbol,
+                side="SELL",
+                price=price,
+                amount=qty_sold,
+                fee=fee,
+                balance_after=self.portfolio.balance,
+                sl=0.0,
+                tp=0.0,
+            )
+        cooldown_seconds = DCA_COOLDOWN_SECONDS   # sit out 5 minutes after any exit
+        cooldown_ts = time() + cooldown_seconds
+        # Reset everything
+        self._reset_position()
+        self.cooldown_until = cooldown_ts
+        log(f"[DCA] {self.symbol} — entered cooldown until {cooldown_ts:.0f}")
+
+    # ------------------------------------------------------------------ #
+    #  Liquidation check                                                   #
+    # ------------------------------------------------------------------ #
+
+    def check_liquidation(self, price: float, liquidation_threshold: float = 0.8) -> bool:
+        if not self.in_position():
+            return False
+        loss   = max(0.0, (self.average_entry_price - price) * self.position)
+        margin = self.total_cost / self.leverage
+        if loss >= margin * liquidation_threshold:
+            log(f"[DCA] {self.symbol} — WARNING: near liquidation! loss={loss:.2f}, margin={margin:.2f}")
+            return True
+        return False
+
+
+===== ./risk/position.py =====
+from log.logger import log
+
+def position_size(balance, entry_price, stop_price, risk_pct):
+    """Not used in DCA branch. Kept for import compatibility."""
+    stop_distance = entry_price - stop_price
+    if stop_distance <= 0:
+        return 0.0
+    return (balance * risk_pct) / stop_distance
+
+
+===== ./strategy/exits.py =====
+from log.logger import log
+from config import *
+
+# Per-symbol tracking of highest price seen since entry
+_highest_prices: dict[str, float] = {}
+
+
+def should_exit(entry_price: float, position, current_price: float, atr: float, symbol: str = "") -> str | None:
+    """
+    Exit logic with trailing stop.
+    Same as main branch but:
+        - per-symbol highest price tracking (not a single global)
+        - trailing stop is applied BEFORE the exit check (bug fix)
+    """
+    # Update peak price for this symbol
+    prev_high = _highest_prices.get(symbol, entry_price)
+    if current_price > prev_high:
+        _highest_prices[symbol] = current_price
+    last_highest_price = _highest_prices.get(symbol, entry_price)
+
+    # --- Base stop / take profit (uses average_entry_price for DCA) ---
+    avg_entry = getattr(position, "average_entry_price", entry_price)
+    stop_loss, take_profit = get_tp_sl(avg_entry, current_price, atr)
+    # print(f"[{symbol}]      Base stop loss: {stop_loss:.2f}, take profit: {take_profit:.2f}, current price: {current_price:.2f}")
+    
+    # Break-even: if price moved 1 ATR above avg entry, floor stop at avg entry
+    if current_price > avg_entry * (1 + BREAKEVEN_TRIGGER_PCT):
+        breakeven = avg_entry * (1 + 2 * FEE_RATE)  # floor covers fees too
+        stop_loss = max(stop_loss, breakeven)
+        log(f"Break-even activated for {symbol} — stop_loss floored at {stop_loss:.2f}")
+        # print("break-even activated — stop loss floored at avg entry")
+    
+    # Trailing stop: accelerating — tightens as profit grows
+    profit_pct = (last_highest_price - avg_entry) / avg_entry
+
+    # Find the right tier
+    trail_dist = None
+    for min_profit, dist in sorted(TRAIL_TIERS, reverse=True):  # highest tier first
+        if profit_pct >= min_profit:
+            trail_dist = dist
+            break
+
+    if trail_dist is not None:
+        trailing_stop = last_highest_price * (1 - trail_dist)
+        log(f"Trail [{symbol}] profit={profit_pct:.2%} → dist={trail_dist:.1%} → stop={trailing_stop:.2f}")
+        stop_loss = max(stop_loss, trailing_stop)
+        
+
+
+    log(
+        f"should_exit [{symbol}] -> avg_entry={avg_entry:.2f}, "
+        f"stop={stop_loss:.2f}, tp={take_profit:.2f}, "
+        f"price={current_price:.2f}, trail_high={last_highest_price:.2f}"
+    )
+
+    if current_price <= stop_loss:
+        log(f"should_exit [{symbol}] decision: STOP")
+        _highest_prices.pop(symbol, None)
+        return "stop"
+
+    if current_price >= take_profit:
+        log(f"should_exit [{symbol}] decision: TAKE_PROFIT")
+        _highest_prices.pop(symbol, None)
+        return "take_profit"
+
+    log(f"should_exit [{symbol}] decision: None")
+    return None
+
+
+def reset_symbol(symbol: str):
+    """Call this after a position is fully closed to clean up state."""
+    _highest_prices.pop(symbol, None)
+
+
+def get_tp_sl(avg_entry_price: float, current_price: float, atr: float):
+    stop_loss   = avg_entry_price - (STOP_LOSS_MULTIPLIER * atr) + (FEE_RATE * current_price) * 2
+    take_profit = avg_entry_price + (TAKE_PROFIT_MULTIPLIER * atr)
+    return stop_loss, take_profit
+
+
+
+===== ./strategy/indicators.py =====
+import pandas as pd
+import pandas_ta as ta
+from log.logger import log
+from config import (
+    EMA_FAST, EMA_SLOW,           # 5m momentum: 9, 21
+    EMA_TREND_FAST, EMA_TREND_SLOW,  # HTF trend: 50, 200
+    RSI_LENGTH,
+    ATR_LENGTH,
+    VOL_MA_LENGTH,
+    MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    BB_LENGTH, BB_STD,
+)
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    # ── Trend (higher timeframe proxy on 5m) ──────────────────────────── #
+    df["ema50"]  = ta.ema(df["close"], length=EMA_TREND_FAST)
+    df["ema200"] = ta.ema(df["close"], length=EMA_TREND_SLOW)
+
+    # ── Short-term momentum EMAs ───────────────────────────────────────── #
+    df["ema9"]   = ta.ema(df["close"], length=EMA_FAST)
+    df["ema21"]  = ta.ema(df["close"], length=EMA_SLOW)
+
+    # ── RSI ───────────────────────────────────────────────────────────── #
+    df["rsi"]    = ta.rsi(df["close"], length=RSI_LENGTH)
+
+    # ── ATR (volatility / position sizing) ────────────────────────────── #
+    df["atr"]    = ta.atr(df["high"], df["low"], df["close"], length=ATR_LENGTH)
+
+    # ── Volume MA ─────────────────────────────────────────────────────── #
+    df["vol_ma"] = df["volume"].rolling(VOL_MA_LENGTH).mean()
+
+    # ── MACD ──────────────────────────────────────────────────────────────── #
+    macd = ta.macd(df["close"], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+    # Column names vary by pandas_ta version — grab by position instead of hardcoded name
+    df["macd"]        = macd.iloc[:, 0]   # MACD line
+    df["macd_signal"] = macd.iloc[:, 1]   # Signal line  
+    df["macd_hist"]   = macd.iloc[:, 2]   # Histogram
+
+    # ── Bollinger Bands ────────────────────────────────────────────────── #
+    bb = ta.bbands(df["close"], length=BB_LENGTH, std=BB_STD)
+    # Same — grab by position: lower, mid, upper, bandwidth, %b
+    df["bb_lower"] = bb.iloc[:, 0]
+    df["bb_mid"]   = bb.iloc[:, 1]
+    df["bb_upper"] = bb.iloc[:, 2]
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"]
+
+    log("Added indicators: ema9, ema21, ema50, ema200, rsi, atr, vol_ma, macd, bbands")
+    return df
+
+
+===== ./strategy/logic.py =====
+import pandas as pd
+from log.logger import log
+from config import (
+    # DCA structure
+    DCA_DROP_STEP_PCT,
+    DCA_MAX_SPEND_PER_LEVEL,
+    # Fee / edge
+    FEE_RATE,
+    LESS_STRICT_SHOULD_LONG,
+    MIN_EDGE_PCT,
+    # Momentum score thresholds
+    MIN_CONFLUENCE_SCORE,
+    # RSI
+    RSI_BULL_ZONE,          # e.g. 55 — above = momentum
+    RSI_MAX,                # e.g. 75 — above = overbought, skip
+    RSI_OVERSOLD,           # e.g. 45 — below = washed out (bonus point)
+    # Volume
+    VOLUME_SPIKE_MULT,      # e.g. 1.5 — volume must be this × vol_ma
+    # Bollinger Bands
+    BB_SQUEEZE_THRESHOLD,   # e.g. 0.02 — bb_width below this = squeeze
+    # HTF bias
+    HTF_TREND_REQUIRED,     # True = skip entries when 50/200 trend is bearish
+)
+
+
+# ─────────────────────────────────────────────────────────────────────── #
+#  Sub-checks (each returns bool + log string for clean debugging)        #
+# ─────────────────────────────────────────────────────────────────────── #
+
+def _check_htf_bias(row) -> tuple[bool, str]:
+    """
+    Higher-timeframe proxy: EMA50 > EMA200 on 5m.
+    Keeps us on the right side of the macro trend.
+    """
+    bullish = row["ema50"] > row["ema200"]
+    gap_pct = (row["ema50"] - row["ema200"]) / row["ema200"] * 100
+    return bullish, f"htf_bias={'BULL' if bullish else 'BEAR'} (ema50-ema200={gap_pct:+.2f}%)"
+
+
+def _check_momentum_ema(row, prev_row) -> tuple[bool, str]:
+    """
+    Short-term momentum: 9 EMA crossed above 21 EMA on this candle,
+    and price closed above both. Signals acceleration beginning.
+    """
+    crossed = (row["ema9"] > row["ema21"]) and (prev_row["ema9"] <= prev_row["ema21"])
+    above_both = row["close"] > row["ema9"] and row["close"] > row["ema21"]
+    bullish = (row["ema9"] > row["ema21"]) and above_both  # already crossed OR just crossed
+    cross_note = "FRESH_CROSS" if crossed else "above" if bullish else "below"
+    return bullish, f"ema_momentum={cross_note} (9ema={row['ema9']:.2f} 21ema={row['ema21']:.2f})"
+
+
+def _check_rsi(row) -> tuple[bool, str]:
+    """
+    RSI in bull momentum zone: above RSI_BULL_ZONE but not overbought.
+    Also catches oversold bounces as a secondary signal.
+    """
+    rsi = row["rsi"]
+    bull_zone = RSI_BULL_ZONE <= rsi <= RSI_MAX
+    oversold_bounce = rsi < RSI_OVERSOLD
+    ok = bull_zone or oversold_bounce
+    zone = "BULL_ZONE" if bull_zone else "OVERSOLD" if oversold_bounce else "NEUTRAL"
+    return ok, f"rsi={rsi:.1f} [{zone}] (need >{RSI_BULL_ZONE} or <{RSI_OVERSOLD})"
+
+
+def _check_volume(row) -> tuple[bool, str]:
+    """
+    Volume expansion: current candle volume is at least VOLUME_SPIKE_MULT × 20-period average.
+    Filters fake breakouts — real moves have participation.
+    """
+    ratio = row["volume"] / row["vol_ma"] if row["vol_ma"] > 0 else 0
+    ok = ratio >= VOLUME_SPIKE_MULT
+    return ok, f"volume={ratio:.2f}x avg (need >{VOLUME_SPIKE_MULT}x)"
+
+
+def _check_macd(row, prev_row) -> tuple[bool, str]:
+    """
+    MACD histogram turned positive (flipped from negative or zero to positive).
+    Compression → expansion = momentum ignition signal.
+    """
+    hist_now  = row["macd_hist"]
+    hist_prev = prev_row["macd_hist"]
+    flipped_positive = hist_now > 0 and hist_prev <= 0
+    already_positive = hist_now > 0
+    ok = already_positive  # positive histogram = bullish momentum
+    note = "FLIP" if flipped_positive else "positive" if ok else f"negative({hist_now:.4f})"
+    return ok, f"macd_hist={note} ({hist_now:.4f})"
+
+
+def _check_bb_expansion(row, prev_row) -> tuple[bool, str]:
+    """
+    Bollinger Band expansion after a squeeze.
+    Price closes above upper band after a low-width period = volatility breakout.
+    """
+    was_squeezed = prev_row["bb_width"] < BB_SQUEEZE_THRESHOLD
+    broke_upper  = row["close"] > row["bb_upper"]
+    expanding    = row["bb_width"] > prev_row["bb_width"]
+    ok = (was_squeezed and broke_upper) or (broke_upper and expanding)
+    note = "SQUEEZE_BREAK" if (was_squeezed and broke_upper) else "EXPANSION" if ok else "inside"
+    return ok, f"bb={note} (width={row['bb_width']:.4f} close={'above' if broke_upper else 'below'} upper)"
+
+
+def _check_atr_edge(row) -> tuple[bool, str]:
+    """
+    Minimum ATR to cover round-trip fees + edge buffer.
+    Prevents trading during dead/flat markets.
+    """
+    expected = row["atr"] / row["close"]
+    required = (2 * FEE_RATE) + MIN_EDGE_PCT
+    ok = expected >= required
+    return ok, f"atr_edge={expected:.4%} vs required {required:.4%}"
+
+
+# ─────────────────────────────────────────────────────────────────────── #
+#  DCA level check                                                         #
+# ─────────────────────────────────────────────────────────────────────── #
+
+def _check_dca_level(current_price: float, high: float, symbol_state: dict) -> tuple[bool, float, str]:
+    """
+    Returns (new_level_hit, spend_usd, log_msg).
+    Only True when price crosses a new DCA_DROP_STEP_PCT% level below 24h high.
+    """
+    if high <= 0:
+        return False, 0.0, "invalid high"
+
+    drop_pct      = (high - current_price) / high * 100
+    last_trigger  = symbol_state.get("last_trigger_pct", 0.0)
+    current_level = int(drop_pct / DCA_DROP_STEP_PCT)
+    last_level    = int(last_trigger / DCA_DROP_STEP_PCT)
+
+    msg = f"drop={drop_pct:.2f}% level={current_level} (was {last_level})"
+
+    if current_level > last_level and drop_pct >= DCA_DROP_STEP_PCT:
+        spend_usd = min(round(drop_pct, 2), DCA_MAX_SPEND_PER_LEVEL)
+        return True, spend_usd, msg + f" -> NEW LEVEL spend=${spend_usd:.2f}"
+
+    return False, 0.0, msg + " -> no new level"
+
+
+# ─────────────────────────────────────────────────────────────────────── #
+#  Main entry function                                                     #
+# ─────────────────────────────────────────────────────────────────────── #
+
+def should_long_dca(
+    current_price: float,
+    high: float,
+    symbol_state: dict,
+    df: pd.DataFrame,
+) -> tuple[bool, float]:
+    """
+    High-confluence DCA entry system.
+
+    Gate 1 — DCA structure : price must have dropped a new level from 24h high
+    Gate 2 — ATR edge      : must be enough volatility to cover fees
+    Gate 3 — HTF bias      : skip if macro trend is bearish (configurable)
+    Gate 4 — Momentum score: need MIN_CONFLUENCE_SCORE out of 4 signals:
+                            +1 EMA9 > EMA21 (momentum shift)
+                            +1 RSI in bull zone or oversold bounce
+                            +1 Volume spike > VOLUME_SPIKE_MULT × avg
+                            +1 MACD histogram positive
+                            +1 BB expansion / squeeze break  (bonus)
+
+    Returns (should_buy, spend_usd).
+    """
+    
+    
+
+    
+    row      = df.iloc[-1]
+    prev_row = df.iloc[-2]
+
+    # ── Gate 1: DCA level ─────────────────────────────────────────────── #
+    new_level, spend_usd, dca_msg = _check_dca_level(current_price, high, symbol_state)
+    
+    
+    # -- Gate 1.1: if LESS_STRICT_SHOULD_LONG, allow same level re-entry if confluence is very strong (score 4/5) ---
+    if LESS_STRICT_SHOULD_LONG: #! FOR TESTING ONLY: skips all gates except, and ignores HTF bias even if required. Use to generate more trades and test exit logic.
+        log(f"[ENTRY] [LESS STRICT SHOULD LONG ENABLED]✓  -> spend=${spend_usd:.2f}")
+        return True, 10.0  # fixed spend for testing
+    
+    
+    log(f"[DCA] {dca_msg}")
+    if not new_level:
+        return False, 0.0
+
+
+
+    # ── Gate 2: ATR edge ──────────────────────────────────────────────── #
+    edge_ok, edge_msg = _check_atr_edge(row)
+    log(f"[ATR] {edge_msg}")
+    if not edge_ok:
+        return False, 0.0
+
+    # ── Gate 3: HTF bias (optional hard gate) ─────────────────────────── #
+    htf_ok, htf_msg = _check_htf_bias(row)
+    log(f"[HTF] {htf_msg}")
+    if HTF_TREND_REQUIRED and not htf_ok:
+        log("[ENTRY] blocked: HTF_TREND_REQUIRED and trend is bearish")
+        return False, 0.0
+
+    # ── Gate 4: Momentum confluence score ─────────────────────────────── #
+    score = 0
+    signals = []
+
+    ema_ok,  ema_msg  = _check_momentum_ema(row, prev_row)
+    rsi_ok,  rsi_msg  = _check_rsi(row)
+    vol_ok,  vol_msg  = _check_volume(row)
+    macd_ok, macd_msg = _check_macd(row, prev_row)
+    bb_ok,   bb_msg   = _check_bb_expansion(row, prev_row)
+
+    if ema_ok:  score += 1; signals.append("EMA_MOM")
+    if rsi_ok:  score += 1; signals.append("RSI")
+    if vol_ok:  score += 1; signals.append("VOLUME")
+    if macd_ok: score += 1; signals.append("MACD")
+    if bb_ok:   score += 1; signals.append("BB_EXPAND")   # bonus — can push score to 5
+
+    log(f"[SCORE] {score}/{MIN_CONFLUENCE_SCORE} needed | signals={signals}")
+    log(f"  {ema_msg}")
+    log(f"  {rsi_msg}")
+    log(f"  {vol_msg}")
+    log(f"  {macd_msg}")
+    log(f"  {bb_msg}")
+
+    if score < MIN_CONFLUENCE_SCORE:
+        log(f"[ENTRY] blocked: score {score} < {MIN_CONFLUENCE_SCORE} required")
+        return False, 0.0
+    
+
+    log(f"[ENTRY] ✓ DCA level + score={score} + {'BULL' if htf_ok else 'BEAR'} trend -> spend=${spend_usd:.2f}")
+    return True, spend_usd
+
+
+===== ./strategy/ml_model.py =====
+
+
+===== ./strategy/signals.py =====
+
+

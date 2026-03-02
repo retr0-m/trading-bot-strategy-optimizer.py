@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Bot Dashboard</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <meta http-equiv="refresh" content="5" />
+
+    <style>
+      body {
+        background: radial-gradient(circle at top, #0f172a, #020617);
+      }
+    </style>
+  </head>
+
+  <body class="text-slate-200 min-h-screen">
+    <div class="container mx-auto p-6 space-y-8">
+      <!-- Header -->
+      <div class="flex items-center justify-between">
+        <h1 class="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-500 bg-clip-text text-transparent">Trading Bot Dashboard</h1>
+
+        <a href="/generate_report/" target="_blank">
+          <button class="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-cyan-400/50 transition-all text-sm font-semibold text-cyan-300">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            </svg>Export PDF
+          </button>
+        </a>
+      </div>
+      <!-- ================= Portfolio ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-cyan-300">Portfolio</h2>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="p-4 rounded-xl bg-black/30 border border-white/10">
+            <p class="text-sm text-slate-400">Balance</p>
+            <p class="text-2xl font-bold text-green-400">${{ '%.2f'|format(portfolio.balance) }}</p>
+          </div>
+
+          <div class="p-4 rounded-xl bg-black/30 border border-white/10">
+            <p class="text-sm text-slate-400">Equity</p>
+            <p class="text-2xl font-bold text-purple-400">${{ '%.2f'|format(portfolio.equity) }}</p>
+          </div>
+        </div>
+      </div>
+      <!-- ================= Open Positions ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-green-300">Open Positions</h2>
+
+        {% if portfolio.positions %}
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {% for pos in portfolio.positions %}
+              <div class="bg-black/30 border border-white/10 rounded-xl p-4">
+                <div class="flex justify-between mb-2">
+                  <div>
+                    <p class="text-lg font-bold text-cyan-400">{{ pos.symbol }}</p>
+                    <p class="text-sm text-slate-400">Entry: ${{ '%.2f'|format(pos.entry) }}</p>
+                  </div>
+                  <div class="text-right">
+                    <p class="text-sm text-red-400">SL: ${{ '%.2f'|format(pos.stop_loss) }}</p>
+                    <p class="text-sm text-green-400">TP: ${{ '%.2f'|format(pos.take_profit) }}</p>
+                  </div>
+                </div>
+
+                <canvas id="positionChart{{ loop.index }}" height="320"></canvas>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-slate-400">No open positions</p>
+        {% endif %}
+      </div>
+
+      <!-- ================= Equity Curve ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-lg font-semibold mb-3 text-cyan-300">Equity Curve</h2>
+        <canvas id="equityChart" height="120"></canvas>
+      </div>
+
+      <!-- ================= Drawdown ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-4">
+        <h2 class="text-sm font-semibold mb-2 text-red-300">Drawdown %</h2>
+        <canvas id="drawdownChart" height="60"></canvas>
+      </div>
+
+      <!-- ================= PnL + Frequency ================= -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- PnL Histogram -->
+        <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+          <h2 class="text-lg font-semibold mb-3 text-purple-300">PnL per Trade</h2>
+          <canvas id="pnlChart"></canvas>
+        </div>
+
+        <!-- Trade Frequency -->
+        <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+          <h2 class="text-lg font-semibold mb-3 text-orange-300">Trade Frequency</h2>
+          <canvas id="freqChart"></canvas>
+        </div>
+      </div>
+
+      <!-- ================= Trade History ================= -->
+      <div class="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-6">
+        <h2 class="text-xl font-semibold mb-4 text-purple-300">Trade History</h2>
+
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="text-left text-slate-400 border-b border-white/10">
+                <th class="px-4 py-3">Time</th>
+                <th class="px-4 py-3">Type</th>
+                <th class="px-4 py-3">Symbol</th>
+                <th class="px-4 py-3">Qty</th>
+                <th class="px-4 py-3">Price</th>
+                <th class="px-4 py-3">Expense</th>
+                <th class="px-4 py-3">Fee</th>
+                <th class="px-4 py-3">Balance After</th>
+              </tr>
+            </thead>
+
+            <tbody class="divide-y divide-white/5">
+              {% for t in portfolio.trade_history %}
+                <tr class="hover:bg-white/5">
+                  <td class="px-4 py-2">{{ t.time }}</td>
+                  <td class="px-4 py-2 font-semibold {% if t.type == 'BUY' %}
+                      
+                      
+                      
+                      
+                      text-green-400
+
+
+
+
+                    {% else %}
+                      
+                      
+                      
+                      
+                      text-red-400
+
+
+
+
+                    {% endif %}">{{ t.type }}</td>
+                  <td class="px-4 py-2 text-cyan-300">{{ t.symbol }}</td>
+                  <td class="px-4 py-2">{{ '%.6f'|format(t.qty) }}</td>
+                  <td class="px-4 py-2">${{ '%.2f'|format(t.price) }}</td>
+                  <td class="px-4 py-2 text-orange-400">${{ '%.2f'|format(t.expense) }}</td>
+                  <td class="px-4 py-2 text-red-400">${{ '%.2f'|format(t.fee) }}</td>
+                  <td class="px-4 py-2 text-green-300">${{ '%.2f'|format(t.balance_after) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= Charts JS ================= -->
+    <script>
+  const openPositions = {{ portfolio.positions | safe }};
+  const labels = {{ chart_labels | default('[]', true) | safe }};
+  const equity = {{ equity_curve | default('[]', true) | safe }};
+  const drawdown = {{ drawdown_curve | default('[]', true) | safe }};
+  const pnl = {{ pnl_per_trade | default('[]', true) | safe }};
+  const freqLabels = {{ trade_freq_labels | default('[]', true) | safe }};
+  const freqData = {{ trade_freq | default('[]', true) | safe }};
+
+  const equityCtx = document.getElementById("equityChart");
+  const drawdownCtx = document.getElementById("drawdownChart");
+  const pnlCtx = document.getElementById("pnlChart");
+  const freqCtx = document.getElementById("freqChart");
+
+  if (equity.length) {
+    new Chart(equityCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          data: equity,
+          borderColor: "#22d3ee",
+          borderWidth: 2,
+          tension: 0.3
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (drawdown.length) {
+    new Chart(drawdownCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          data: drawdown,
+          borderColor: "#f87171",
+          borderWidth: 1,
+          tension: 0.3
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (pnl.length) {
+    new Chart(pnlCtx, {
+      type: "bar",
+      data: {
+        labels: pnl.map((_, i) => i + 1),
+        datasets: [{
+          data: pnl,
+          backgroundColor: pnl.map(v => v >= 0 ? "#22c55e" : "#ef4444")
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  if (freqData.length) {
+    new Chart(freqCtx, {
+      type: "bar",
+      data: {
+        labels: freqLabels,
+        datasets: [{
+          data: freqData,
+          backgroundColor: "#fb923c"
+        }]
+      },
+      options: { plugins: { legend: { display: false } } }
+    });
+  }
+
+  async function fetchKlines(symbol, startTime) {
+    const response = await fetch(
+      `/api/klines?symbol=${symbol}&start_time=${startTime}`
+    );
+    return await response.json();
+  }
+
+  async function fetchCurrentPrice(symbol) {
+    const response = await fetch(
+      `/api/price?symbol=${symbol}`
+    );
+    const data = await response.json();
+    return parseFloat(data.price);
+  }
+
+  function createPositionChart(ctx, labels, prices, entry, sl, tp) {
+    return new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Price",
+            data: prices,
+            borderColor: "#22d3ee",
+            borderWidth: 2,
+            tension: 0.2,
+            pointRadius: 0
+          },
+          {
+            label: "Entry",
+            data: labels.map(() => entry),
+            borderColor: "#a78bfa",
+            borderDash: [5, 5],
+            pointRadius: 0
+          },
+          {
+            label: "Stop Loss",
+            data: labels.map(() => sl),
+            borderColor: "#ef4444",
+            borderDash: [5, 5],
+            pointRadius: 0
+          },
+          {
+            label: "Take Profit",
+            data: labels.map(() => tp),
+            borderColor: "#22c55e",
+            borderDash: [5, 5],
+            pointRadius: 0
+          }
+        ]
+      },
+      options: {
+        animation: false,
+        scales: {
+          x: { ticks: { color: "#94a3b8" }},
+          y: { ticks: { color: "#94a3b8" }}
+        },
+        plugins: {
+          legend: { labels: { color: "#94a3b8" }}
+        }
+      }
+    });
+  }
+
+  async function initPositionCharts() {
+    if (!openPositions.length) return;
+
+    openPositions.forEach(async (pos, index) => {
+      const ctx = document.getElementById(`positionChart${index + 1}`);
+
+      const symbol = pos.symbol.replace("/", "");
+      const entryTime = pos.entry_time;
+
+      const klines = await fetchKlines(symbol, entryTime);
+
+      const labels = klines.map(k => {
+        const date = new Date(k[0]);
+        return date.toLocaleTimeString();
+      });
+
+      const prices = klines.map(k => parseFloat(k[4])); // close price
+
+      const chart = createPositionChart(
+        ctx,
+        labels,
+        prices,
+        pos.entry,
+        pos.stop_loss,
+        pos.take_profit
+      );
+
+      // 🔥 LIVE UPDATING LOOP
+      setInterval(async () => {
+        const currentPrice = await fetchCurrentPrice(symbol);
+        const nowLabel = new Date().toLocaleTimeString();
+
+        chart.data.labels.push(nowLabel);
+        chart.data.datasets[0].data.push(currentPrice);
+
+        // extend horizontal lines
+        chart.data.datasets[1].data.push(pos.entry);
+        chart.data.datasets[2].data.push(pos.stop_loss);
+        chart.data.datasets[3].data.push(pos.take_profit);
+
+        chart.update();
+      }, 5000); // update every 5s
+    });
+  }
+
+  initPositionCharts();
+</script>
+  </body>
+</html>

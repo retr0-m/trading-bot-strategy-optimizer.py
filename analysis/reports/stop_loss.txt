@@ -1,0 +1,27 @@
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.19
+[BTCUSDT]      Base stop loss: 63520.16, take profit: 64668.14, current price: 63894.13
+[ETHUSDT]      Base stop loss: 1833.26, take profit: 1874.50, current price: 1846.38
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.34
+[BTCUSDT]      Base stop loss: 63520.07, take profit: 64668.14, current price: 63847.39
+[ETHUSDT]      Base stop loss: 1833.26, take profit: 1874.50, current price: 1845.83
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.30
+[BTCUSDT]      Base stop loss: 63516.88, take profit: 64675.52, current price: 63914.00
+[ETHUSDT]      Base stop loss: 1833.00, take profit: 1875.09, current price: 1848.89
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.69, current price: 77.37
+[BTCUSDT]      Base stop loss: 63510.49, take profit: 64689.83, current price: 63939.49
+[ETHUSDT]      Base stop loss: 1832.86, take profit: 1875.40, current price: 1849.25
+[SOLUSDT]      Base stop loss: 76.71, take profit: 78.72, current price: 77.43
+[BTCUSDT]      Base stop loss: 63510.43, take profit: 64689.83, current price: 63909.40
+[ETHUSDT]      Base stop loss: 1832.86, take profit: 1875.40, current price: 1848.14
+[SOLUSDT]      Base stop loss: 76.71, take profit: 78.72, current price: 77.42
+... (more lines) ...
+[BTCUSDT]      Base stop loss: 63521.49, take profit: 64665.18, current price: 63895.96
+[ETHUSDT]      Base stop loss: 1833.36, take profit: 1874.29, current price: 1847.97
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.67, current price: 77.29
+[BTCUSDT]      Base stop loss: 63521.49, take profit: 64665.18, current price: 63891.75
+[ETHUSDT]      Base stop loss: 1833.36, take profit: 1874.29, current price: 1847.14
+[SOLUSDT]      Base stop loss: 76.73, take profit: 78.67, current price: 77.30
+... (more lines) ...
+[BTCUSDT]      Base stop loss: 63542.65, take profit: 64617.89, current price: 63835.06
+[ETHUSDT]      Base stop loss: 1834.33, take profit: 1872.12, current price: 1845.21
+[SOLUSDT]      Base stop loss: 76.77, take profit: 78.59, current price: 77.29

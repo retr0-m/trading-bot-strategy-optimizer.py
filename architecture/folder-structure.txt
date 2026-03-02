@@ -1,0 +1,13 @@
+bot/
+├── data/
+│   └── market_stream.py
+├── strategy/
+│   ├── indicators.py
+│   ├── signals.py
+│   └── ml_model.py
+├── risk/
+│   └── position_sizing.py
+├── execution/
+│   └── binance_client.py
+├── config.py
+└── main.py
