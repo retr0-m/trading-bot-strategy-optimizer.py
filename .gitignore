@@ -19,3 +19,7 @@ __pycache__/
 env/
 log/db/*.db
 */__pycache__/
+*db
+*/*.db
+*/*/*.db
+log/db/kline_cache.db
